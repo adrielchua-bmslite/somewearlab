@@ -1,0 +1,29 @@
+.DS_Store
+local.properties
+
+# Gradle/Android intermediates
+**/.gradle/
+**/.gradle-project-cache/
+**/build/
+*.apk
+*.xapk
+*.idsig
+*.zip
+/somewear-gateway-sdk/gradlew.bat
+
+# Reverse-engineering workspace and vendor material
+/build/
+/decompiled/
+/decompiled_debug/
+/graphify-out/
+/standalone-apk/
+/stripped-artifacts/
+/unpacked/
+/ATAK+Plugin*
+/STANDALONE_GATEWAY.md
+/gateway-patches/
+/somewear-gateway-sdk/gateway-helper/
+/somewear-gateway-sdk/test-app/
+/somewear-gateway-sdk/scripts/
+/somewear-gateway-sdk/test-logs/
+/somewear-gateway-sdk/SC3_INTEGRATION_CHECKLIST.md
