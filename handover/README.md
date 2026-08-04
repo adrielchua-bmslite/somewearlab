@@ -19,9 +19,51 @@ The gateway owns Somewear Core, Bluetooth/USB, radio/satellite routing, storage,
 
 The full decoded vendor tree, signing private keys, SC3 source, device credentials, authentication tokens, and workspace/mesh-key material are not included.
 
+## Prerequisite: Android SDK command-line tools
+
+The handover scripts require:
+
+- Android SDK Build-Tools (`apksigner`, `aapt2`, and `zipalign`).
+- Android SDK Platform-Tools (`adb`).
+- Bash. On Windows, run the scripts from Git Bash or WSL rather than PowerShell.
+
+Install the tools through Android Studio:
+
+```text
+Tools > SDK Manager > SDK Tools
+  [x] Android SDK Build-Tools
+  [x] Android SDK Platform-Tools
+```
+
+The scripts automatically search standard Android Studio locations. If the SDK uses a custom location, set it before running the scripts.
+
+macOS default:
+
+```sh
+export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
+```
+
+Linux default:
+
+```sh
+export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
+```
+
+Windows Git Bash default:
+
+```sh
+export ANDROID_SDK_ROOT="$(cygpath -u "$LOCALAPPDATA")/Android/Sdk"
+```
+
+Confirm that Build-Tools are installed:
+
+```sh
+find "$ANDROID_SDK_ROOT/build-tools" -name 'apksigner*' -print
+```
+
 ## 1. Validate the checked-in artifacts
 
-Install Android SDK Build Tools, then run:
+Then run:
 
 ```sh
 ./handover/scripts/verify_gateway_artifacts.sh
