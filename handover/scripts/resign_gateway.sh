@@ -3,6 +3,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 source "$script_dir/common.sh"
 
 if [[ $# -ne 4 ]]; then
@@ -14,6 +15,21 @@ input_dir="$1"
 output_dir="$2"
 keystore="$3"
 key_alias="$4"
+
+sums_file="$repo_root/handover/SHA256SUMS"
+[[ -f "$sums_file" ]] || fail "SHA256SUMS is missing: $sums_file"
+for apk_name in "${gateway_apk_names[@]}"; do
+  artifact_name="build/signed-splits-v2/$apk_name"
+  input_apk="$input_dir/$apk_name"
+  [[ -f "$input_apk" ]] || fail "gateway split is missing: $input_apk"
+  expected_hash="$(awk -v artifact="$artifact_name" '$2 == artifact { print $1; exit }' "$sums_file")"
+  [[ -n "$expected_hash" ]] || fail "missing committed hash for $artifact_name"
+  actual_hash="$(sha256_file "$input_apk")"
+  if [[ "$actual_hash" != "$expected_hash" ]]; then
+    fail "input is not the prepared standalone gateway: $apk_name. Do not re-sign the original ATAK/Somewear APK or an older gateway build; use build/signed-splits-v2 from this repository."
+  fi
+done
+echo "prepared_gateway_check=OK"
 
 [[ -f "$keystore" ]] || fail "keystore does not exist: $keystore"
 [[ -n "${GATEWAY_KEYSTORE_PASSWORD:-}" ]] || fail "set GATEWAY_KEYSTORE_PASSWORD"

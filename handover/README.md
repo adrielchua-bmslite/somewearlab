@@ -62,6 +62,8 @@ This confirms that every split is present, every split has the same valid APK si
 
 The gateway permission is signature protected. SC3 and all five gateway APKs must have the same signing-certificate SHA-256 digest.
 
+**Only re-sign the five APKs from `build/signed-splits-v2`.** That base APK contains the standalone provider and the Somewear startup bootstrap that initializes vendor singletons such as `instanceProvider`. Do not use the original ATAK/Somewear APK, `build/signed-splits`, or an older handover build. The re-signing scripts verify every input hash and stop with `input is not the prepared standalone gateway` if the wrong build is supplied.
+
 Do not commit or send a production keystore. For a controlled prototype, the recipient should use a dedicated team test keystore and configure their SC3 build to use it.
 
 Set password variables without placing passwords in shell history:
@@ -156,6 +158,7 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 |---|---|---|
 | `GATEWAY_NOT_INSTALLED` | The gateway base package/provider is absent or not visible. | Install all five splits and ensure the AAR manifest merged its `<queries>` entry. |
 | `PERMISSION_DENIED` | SC3 and the gateway have different signing certificates. | Re-sign every gateway split and SC3 with the same keystore. |
+| `lateinit property instanceProvider has not been initialized` | An original or older ATAK plugin was re-signed/installed without the standalone Somewear bootstrap. | Pull the latest repository, re-sign only `build/signed-splits-v2`, and install all five resulting APKs together. |
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
 | Native-library/ABI failure | The device is not ARM64 or its required split was omitted. | Use a compatible ARM64 physical device and install `config.arm64_v8a.apk`. |
 | Bluetooth failure | Gateway permissions, bonding, provisioning, or Node reachability is incomplete. | Grant gateway permissions, bond the Node, then inspect `deviceStatus()`. |

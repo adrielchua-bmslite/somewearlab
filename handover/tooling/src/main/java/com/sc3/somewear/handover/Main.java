@@ -38,8 +38,14 @@ public final class Main {
                 usage();
             } else if ("verify".equals(args[0]) && args.length == 4) {
                 verify(Path.of(args[1]), Path.of(args[2]), Path.of(args[3]));
-            } else if ("resign".equals(args[0]) && args.length == 5) {
-                resign(Path.of(args[1]), Path.of(args[2]), Path.of(args[3]), args[4]);
+            } else if ("resign".equals(args[0]) && args.length == 6) {
+                resign(
+                        Path.of(args[1]),
+                        Path.of(args[2]),
+                        Path.of(args[3]),
+                        Path.of(args[4]),
+                        args[5]
+                );
             } else {
                 usage();
             }
@@ -54,7 +60,8 @@ public final class Main {
 
     private static void usage() {
         throw new IllegalArgumentException(
-                "usage: verify REPO_ROOT APK_DIR AAR | resign INPUT_DIR OUTPUT_DIR KEYSTORE KEY_ALIAS"
+                "usage: verify REPO_ROOT APK_DIR AAR | "
+                        + "resign REPO_ROOT INPUT_DIR OUTPUT_DIR KEYSTORE KEY_ALIAS"
         );
     }
 
@@ -116,10 +123,18 @@ public final class Main {
         }
     }
 
-    private static void resign(Path inputDir, Path outputDir, Path keystore, String alias) throws Exception {
+    private static void resign(
+            Path repoRoot,
+            Path inputDir,
+            Path outputDir,
+            Path keystore,
+            String alias
+    ) throws Exception {
+        repoRoot = repoRoot.toAbsolutePath().normalize();
         inputDir = inputDir.toAbsolutePath().normalize();
         outputDir = outputDir.toAbsolutePath().normalize();
         keystore = keystore.toAbsolutePath().normalize();
+        verifyPreparedGatewayInputs(repoRoot, inputDir);
         requireFile(keystore, "keystore");
 
         char[] storePassword = requiredPassword("GATEWAY_KEYSTORE_PASSWORD");
@@ -190,6 +205,41 @@ public final class Main {
                 Arrays.fill(keyPassword, '\0');
             }
         }
+    }
+
+    private static void verifyPreparedGatewayInputs(Path repoRoot, Path inputDir) throws Exception {
+        Path sumsFile = repoRoot.resolve("handover/SHA256SUMS");
+        requireFile(sumsFile, "SHA256SUMS");
+        List<String> lines = Files.readAllLines(sumsFile, StandardCharsets.UTF_8);
+
+        for (String apkName : APK_NAMES) {
+            String artifactName = "build/signed-splits-v2/" + apkName;
+            String expectedHash = null;
+            for (String line : lines) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                String[] fields = line.trim().split("\\s+", 2);
+                if (fields.length == 2 && artifactName.equals(fields[1])) {
+                    expectedHash = fields[0];
+                    break;
+                }
+            }
+            if (expectedHash == null) {
+                throw new IllegalStateException("missing committed hash for " + artifactName);
+            }
+
+            Path inputApk = inputDir.resolve(apkName);
+            requireFile(inputApk, "gateway split");
+            if (!expectedHash.equalsIgnoreCase(sha256(inputApk))) {
+                throw new IllegalStateException(
+                        "input is not the prepared standalone gateway: " + apkName + ". "
+                                + "Do not re-sign the original ATAK/Somewear APK or an older gateway build; "
+                                + "use build/signed-splits-v2 from this repository."
+                );
+            }
+        }
+        System.out.println("prepared_gateway_check=OK");
     }
 
     private static KeyMaterial loadKey(
