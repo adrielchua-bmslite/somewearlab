@@ -22,7 +22,7 @@ SDK version: `0.1.0`
 
 The SDK exposes the complete SC3-facing contract. Gateway v5 implements standalone initialization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, and delivery-status polling. Workspace/key readiness and automatic radio-then-satellite fallback remain unsupported.
 
-The SDK expects a separately distributed gateway implementing the API-v2 contract documented below. Gateway APKs and vendor binaries are intentionally not included in this source repository.
+The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
 The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. That method lets Somewear Core use its default Radio + Satellite + Cellular channel set and is not safe when satellite cost must be controlled.
 

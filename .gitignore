@@ -12,7 +12,17 @@ local.properties
 /somewear-gateway-sdk/gradlew.bat
 
 # Reverse-engineering workspace and vendor material
-/build/
+# The five gateway handover APKs below are the only committed build artifacts.
+!/build/
+/build/*
+!/build/signed-splits-v2/
+/build/signed-splits-v2/*
+!/build/signed-splits-v2/README.md
+!/build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk
+!/build/signed-splits-v2/config.arm64_v8a.apk
+!/build/signed-splits-v2/config.en.apk
+!/build/signed-splits-v2/config.fr.apk
+!/build/signed-splits-v2/config.mdpi.apk
 /decompiled/
 /decompiled_debug/
 /graphify-out/
@@ -21,9 +31,8 @@ local.properties
 /unpacked/
 /ATAK+Plugin*
 /STANDALONE_GATEWAY.md
-/gateway-patches/
-/somewear-gateway-sdk/gateway-helper/
 /somewear-gateway-sdk/test-app/
 /somewear-gateway-sdk/scripts/
 /somewear-gateway-sdk/test-logs/
 /somewear-gateway-sdk/SC3_INTEGRATION_CHECKLIST.md
+/handover/out/

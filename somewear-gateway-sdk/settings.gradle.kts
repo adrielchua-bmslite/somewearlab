@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "somewear-gateway-sdk"
 include(":sdk")
+include(":gateway-helper")
