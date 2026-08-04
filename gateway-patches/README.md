@@ -3,10 +3,18 @@
 `SomewearGatewayProvider.smali` is the injected provider used by gateway v5. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
-- runs the modified standalone `PluginConfig.setup(context)` before core startup;
+- initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
 - initializes the API-v2 helper;
 - delegates API-v2 calls to `GatewayV2` before the legacy API-v1 dispatcher;
 - retains the legacy Bluetooth and router entry points.
+
+`SomewearPlugin.smali` initializes Realm defensively in `Application.onCreate()`
+but deliberately leaves vendor-core configuration to the provider. This avoids
+configuring the singleton graph twice and prevents IPC from racing application startup.
+
+`PluginConfig$Companion.smali` registers `RealmBuilderModule` immediately after
+Somewear Core configuration. This supplies the Realm singleton used by metric,
+message, and database background tasks without depending on ATAK setup.
 
 `GatewayV2` itself is maintained as readable Java under:
 

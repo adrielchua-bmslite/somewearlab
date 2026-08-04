@@ -12,6 +12,8 @@ The gateway owns Somewear Core, Bluetooth/USB, radio/satellite routing, storage,
 - `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
 - Five gateway APKs under `build/signed-splits-v2/`
 - `gateway-patches/SomewearGatewayProvider.smali`
+- `gateway-patches/SomewearPlugin.smali`
+- `gateway-patches/PluginConfig$Companion.smali`
 - `gateway-patches/ConnectionContinuation.smali`
 - `somewear-gateway-sdk/gateway-helper/src/main/java/com/somewearlabs/gateway/GatewayV2.java`
 - Signing, installation, and validation scripts under `handover/scripts/`
@@ -159,6 +161,7 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 | `GATEWAY_NOT_INSTALLED` | The gateway base package/provider is absent or not visible. | Install all five splits and ensure the AAR manifest merged its `<queries>` entry. |
 | `PERMISSION_DENIED` | SC3 and the gateway have different signing certificates. | Re-sign every gateway split and SC3 with the same keystore. |
 | `lateinit property instanceProvider has not been initialized` | An original or older ATAK plugin was re-signed/installed without the standalone Somewear bootstrap. | Pull the latest repository, re-sign only `build/signed-splits-v2`, and install all five resulting APKs together. |
+| `Call Realm.init(Context) before creating a RealmConfiguration` | The installed gateway predates the application-level Realm bootstrap. | Pull the latest repository, re-sign `build/signed-splits-v2`, and reinstall all five gateway splits. |
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
 | Native-library/ABI failure | The device is not ARM64 or its required split was omitted. | Use a compatible ARM64 physical device and install `config.arm64_v8a.apk`. |
 | Bluetooth failure | Gateway permissions, bonding, provisioning, or Node reachability is incomplete. | Grant gateway permissions, bond the Node, then inspect `deviceStatus()`. |
