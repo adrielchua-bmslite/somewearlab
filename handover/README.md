@@ -15,56 +15,31 @@ The gateway owns Somewear Core, Bluetooth/USB, radio/satellite routing, storage,
 - `gateway-patches/ConnectionContinuation.smali`
 - `somewear-gateway-sdk/gateway-helper/src/main/java/com/somewearlabs/gateway/GatewayV2.java`
 - Signing, installation, and validation scripts under `handover/scripts/`
+- Portable Windows verifier/signer at `handover/dist/somewear-handover-tools.jar`
 - Artifact hashes in `handover/SHA256SUMS`
 
 The full decoded vendor tree, signing private keys, SC3 source, device credentials, authentication tokens, and workspace/mesh-key material are not included.
 
-## Prerequisite: Android SDK command-line tools
+## Prerequisites
 
-The handover scripts require:
+On Windows, verification and re-signing require only Java 17 or newer. The `.bat` scripts automatically find Java from `JAVA_HOME`, `PATH`, Android Studio's bundled runtime, or common JDK installation directories. They do **not** require `apksigner`, `aapt2`, `zipalign`, `ANDROID_SDK_ROOT`, or `ANDROID_HOME`.
 
-- Android SDK Build-Tools (`apksigner`, `aapt2`, and `zipalign`).
-- Android SDK Platform-Tools (`adb`).
-- Bash for the `.sh` scripts, or Windows Command Prompt/PowerShell for the native `.bat` scripts.
-
-Install the tools through Android Studio:
+Installing onto a phone still requires Android SDK Platform-Tools (`adb`). Install it through Android Studio only when device installation is needed:
 
 ```text
-Tools > SDK Manager > SDK Tools
-  [x] Android SDK Build-Tools
-  [x] Android SDK Platform-Tools
+Tools > SDK Manager > SDK Tools > Android SDK Platform-Tools
 ```
 
-The scripts automatically search standard Android Studio locations. If the SDK uses a custom location, set it before running the scripts.
-
-macOS default:
-
-```sh
-export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
-```
-
-Linux default:
-
-```sh
-export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-```
-
-Windows native scripts do not require Bash. From PowerShell or Command Prompt, start with:
+From Windows PowerShell or Command Prompt, start with this one command:
 
 ```bat
 .\handover\scripts\verify_gateway_artifacts.bat
 ```
 
-The `.bat` scripts automatically search `%LOCALAPPDATA%\Android\Sdk`. If Android Studio uses a custom SDK directory, set it in the same terminal:
-
-```bat
-set "ANDROID_SDK_ROOT=C:\absolute\path\to\Android\Sdk"
-```
-
-Confirm that Build-Tools are installed:
+On macOS/Linux, the existing `.sh` scripts still use Android SDK Build-Tools. They automatically search the standard SDK locations; set a custom location only if necessary:
 
 ```sh
-find "$ANDROID_SDK_ROOT/build-tools" -name 'apksigner*' -print
+export ANDROID_SDK_ROOT='/absolute/path/to/Android/sdk'
 ```
 
 ## 1. Validate the checked-in artifacts
@@ -81,7 +56,7 @@ Windows:
 .\handover\scripts\verify_gateway_artifacts.bat
 ```
 
-This confirms that every split is present, every split has the same signer, the base APK declares the gateway provider, and the committed hashes match.
+This confirms that every split is present, every split has the same valid APK signer, and all committed hashes match. For the checked-in base APK, the provider declaration is bound to that already-inspected artifact by its committed hash.
 
 ## 2. Re-sign the gateway with the SC3 certificate
 
@@ -119,6 +94,8 @@ $env:GATEWAY_KEY_PASSWORD = "test-key-password"
   C:\absolute\path\to\sc3-team-test.jks `
   sc3-test
 ```
+
+The Windows signer is self-contained in the repository and preserves the APKs' existing alignment. No Android SDK Build-Tools setup is involved.
 
 ## 3. Resolve package conflicts
 

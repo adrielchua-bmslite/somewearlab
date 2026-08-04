@@ -1,0 +1,51 @@
+name: Windows handover
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/windows-handover.yml"
+      - ".gitattributes"
+      - "handover/**"
+      - "build/signed-splits-v2/**"
+      - "somewear-gateway-sdk/dist/**"
+
+jobs:
+  verify-and-resign:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Verify committed gateway artifacts without Android Build-Tools
+        shell: cmd
+        run: call handover\scripts\verify_gateway_artifacts.bat
+
+      - name: Create disposable CI signing key
+        shell: cmd
+        run: >-
+          keytool -genkeypair
+          -keystore "%RUNNER_TEMP%\sc3-ci.jks"
+          -storepass testpass123
+          -keypass testpass123
+          -alias sc3-ci
+          -keyalg RSA
+          -keysize 2048
+          -validity 1
+          -dname "CN=SC3 Windows CI"
+          -noprompt
+
+      - name: Re-sign and independently verify all five splits
+        shell: cmd
+        env:
+          GATEWAY_KEYSTORE_PASSWORD: testpass123
+          GATEWAY_KEY_PASSWORD: testpass123
+        run: |
+          call handover\scripts\resign_gateway.bat build\signed-splits-v2 "%RUNNER_TEMP%\signed-gateway" "%RUNNER_TEMP%\sc3-ci.jks" sc3-ci
+          call handover\scripts\verify_gateway_artifacts.bat "%RUNNER_TEMP%\signed-gateway"

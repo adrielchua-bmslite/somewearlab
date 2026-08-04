@@ -1,11 +1,49 @@
 @echo off
 
 if /I "%~1"=="resolve" goto resolve
-if /I "%~1"=="sha256" goto sha256
-if /I "%~1"=="signer" goto signer
+if /I "%~1"=="resolve-java" goto resolve_java
 
 >&2 echo error: unsupported common.bat command
 exit /b 2
+
+:resolve_java
+setlocal EnableExtensions EnableDelayedExpansion
+set "OUTPUT_NAME=%~2"
+set "JAVA_PATH="
+
+for %%J in (
+  "%JAVA_HOME%\bin\java.exe"
+  "%ProgramFiles%\Android\Android Studio\jbr\bin\java.exe"
+  "%ProgramFiles%\Android\Android Studio\jre\bin\java.exe"
+  "%LOCALAPPDATA%\Programs\Android Studio\jbr\bin\java.exe"
+) do if not defined JAVA_PATH if exist "%%~J" set "JAVA_PATH=%%~fJ"
+
+if not defined JAVA_PATH if exist "%ProgramFiles%\Java" (
+  for /f "delims=" %%D in ('dir /b /ad /o-n "%ProgramFiles%\Java\jdk-*" 2^>nul') do (
+    if not defined JAVA_PATH if exist "%ProgramFiles%\Java\%%D\bin\java.exe" set "JAVA_PATH=%ProgramFiles%\Java\%%D\bin\java.exe"
+  )
+)
+
+if not defined JAVA_PATH if exist "%ProgramFiles%\Eclipse Adoptium" (
+  for /f "delims=" %%D in ('dir /b /ad /o-n "%ProgramFiles%\Eclipse Adoptium\jdk-*" 2^>nul') do (
+    if not defined JAVA_PATH if exist "%ProgramFiles%\Eclipse Adoptium\%%D\bin\java.exe" set "JAVA_PATH=%ProgramFiles%\Eclipse Adoptium\%%D\bin\java.exe"
+  )
+)
+
+if not defined JAVA_PATH (
+  for /f "delims=" %%J in ('where java.exe 2^>nul') do if not defined JAVA_PATH set "JAVA_PATH=%%J"
+)
+
+if defined JAVA_PATH (
+  endlocal & set "%OUTPUT_NAME%=%JAVA_PATH%"
+  exit /b 0
+)
+
+>&2 echo error: Java was not found.
+>&2 echo The handover no longer needs Android SDK Build-Tools, but it does need Java 17 or newer.
+>&2 echo Install Android Studio or a Java 17 JDK, then retry. No Android environment variables are required.
+endlocal
+exit /b 1
 
 :resolve
 setlocal EnableExtensions EnableDelayedExpansion
@@ -53,10 +91,8 @@ if defined TOOL_PATH (
 
 >&2 echo error: %TOOL_NAME% was not found.
 >&2 echo.
->&2 echo Install these components in Android Studio:
->&2 echo   Tools ^> SDK Manager ^> SDK Tools
->&2 echo   - Android SDK Build-Tools
->&2 echo   - Android SDK Platform-Tools
+>&2 echo Install Android SDK Platform-Tools in Android Studio:
+>&2 echo   Tools ^> SDK Manager ^> SDK Tools ^> Android SDK Platform-Tools
 >&2 echo.
 >&2 echo The script searched PATH, ANDROID_SDK_ROOT, ANDROID_HOME, and:
 >&2 echo   %%LOCALAPPDATA%%\Android\Sdk
@@ -65,55 +101,3 @@ if defined TOOL_PATH (
 >&2 echo   set "ANDROID_SDK_ROOT=C:\absolute\path\to\Android\Sdk"
 endlocal
 exit /b 1
-
-:sha256
-setlocal EnableExtensions
-set "FILE_PATH=%~2"
-set "OUTPUT_NAME=%~3"
-set "FILE_HASH="
-
-if not exist "%FILE_PATH%" (
-  >&2 echo error: file not found: %FILE_PATH%
-  endlocal
-  exit /b 1
-)
-
-for /f "skip=1 tokens=* delims=" %%H in ('certutil -hashfile "%FILE_PATH%" SHA256 2^>nul') do if not defined FILE_HASH set "FILE_HASH=%%H"
-set "FILE_HASH=%FILE_HASH: =%"
-if not defined FILE_HASH (
-  >&2 echo error: could not calculate SHA-256: %FILE_PATH%
-  endlocal
-  exit /b 1
-)
-
-endlocal & set "%OUTPUT_NAME%=%FILE_HASH%"
-exit /b 0
-
-:signer
-setlocal EnableExtensions EnableDelayedExpansion
-set "APKSIGNER_PATH=%~2"
-set "APK_PATH=%~3"
-set "OUTPUT_NAME=%~4"
-set "CERT_OUTPUT=%TEMP%\somewear-apksigner-%RANDOM%-%RANDOM%.txt"
-set "SIGNER_HASH="
-
-call "%APKSIGNER_PATH%" verify --print-certs "%APK_PATH%" >"!CERT_OUTPUT!" 2>nul
-if errorlevel 1 (
-  del /q "!CERT_OUTPUT!" >nul 2>&1
-  >&2 echo error: APK signature verification failed: %APK_PATH%
-  endlocal
-  exit /b 1
-)
-
-for /f "tokens=2 delims=:" %%S in ('findstr /c:"SHA-256 digest:" "!CERT_OUTPUT!"') do if not defined SIGNER_HASH set "SIGNER_HASH=%%S"
-for /f "tokens=*" %%S in ("!SIGNER_HASH!") do set "SIGNER_HASH=%%S"
-del /q "!CERT_OUTPUT!" >nul 2>&1
-
-if not defined SIGNER_HASH (
-  >&2 echo error: could not read APK signer: %APK_PATH%
-  endlocal
-  exit /b 1
-)
-
-endlocal & set "%OUTPUT_NAME%=%SIGNER_HASH%"
-exit /b 0
