@@ -25,7 +25,7 @@ The handover scripts require:
 
 - Android SDK Build-Tools (`apksigner`, `aapt2`, and `zipalign`).
 - Android SDK Platform-Tools (`adb`).
-- Bash. On Windows, run the scripts from Git Bash or WSL rather than PowerShell.
+- Bash for the `.sh` scripts, or Windows Command Prompt/PowerShell for the native `.bat` scripts.
 
 Install the tools through Android Studio:
 
@@ -49,10 +49,16 @@ Linux default:
 export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 ```
 
-Windows Git Bash default:
+Windows native scripts do not require Bash. From PowerShell or Command Prompt, start with:
 
-```sh
-export ANDROID_SDK_ROOT="$(cygpath -u "$LOCALAPPDATA")/Android/Sdk"
+```bat
+.\handover\scripts\verify_gateway_artifacts.bat
+```
+
+The `.bat` scripts automatically search `%LOCALAPPDATA%\Android\Sdk`. If Android Studio uses a custom SDK directory, set it in the same terminal:
+
+```bat
+set "ANDROID_SDK_ROOT=C:\absolute\path\to\Android\Sdk"
 ```
 
 Confirm that Build-Tools are installed:
@@ -67,6 +73,12 @@ Then run:
 
 ```sh
 ./handover/scripts/verify_gateway_artifacts.sh
+```
+
+Windows:
+
+```bat
+.\handover\scripts\verify_gateway_artifacts.bat
 ```
 
 This confirms that every split is present, every split has the same signer, the base APK declares the gateway provider, and the committed hashes match.
@@ -96,6 +108,18 @@ Then re-sign all splits:
 
 Configure SC3's Android `signingConfig` with that same keystore and alias. The script never copies or commits the keystore.
 
+Windows PowerShell equivalent:
+
+```powershell
+$env:GATEWAY_KEYSTORE_PASSWORD = "test-keystore-password"
+$env:GATEWAY_KEY_PASSWORD = "test-key-password"
+.\handover\scripts\resign_gateway.bat `
+  build\signed-splits-v2 `
+  handover\out\signed-gateway `
+  C:\absolute\path\to\sc3-team-test.jks `
+  sc3-test
+```
+
 ## 3. Resolve package conflicts
 
 The standalone gateway uses package ID `com.somewearlabs.swtak.plugin`. An official/Play-signed copy of that package cannot be upgraded with a differently signed prototype build.
@@ -108,6 +132,12 @@ Connect one ARM64 Android device with USB debugging enabled, then run:
 
 ```sh
 ./handover/scripts/install_gateway.sh handover/out/signed-gateway
+```
+
+Windows:
+
+```bat
+.\handover\scripts\install_gateway.bat handover\out\signed-gateway
 ```
 
 For more than one connected device, pass the serial:
