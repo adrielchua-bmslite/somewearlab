@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 internal class ContentProviderSomewearClient(
     context: Context,
@@ -38,19 +39,25 @@ internal class ContentProviderSomewearClient(
         macAddress: String,
         timeoutMillis: Long?,
     ): SomewearResult<DeviceStatus> {
-        if (macAddress.isBlank()) {
-            return invalid(SomewearGatewayContract.Method.CONNECT_BLUETOOTH, "macAddress must not be blank")
+        val normalizedAddress = normalizeBluetoothMacAddress(macAddress)
+        if (normalizedAddress == null) {
+            return invalid(
+                SomewearGatewayContract.Method.CONNECT_BLUETOOTH,
+                "macAddress must use the form AA:BB:CC:DD:EE:FF",
+            )
         }
         val accepted = call(
             SomewearGatewayContract.Method.CONNECT_BLUETOOTH,
-            Bundle().apply { putString(SomewearGatewayContract.Key.ADDRESS, macAddress) },
+            Bundle().apply { putString(SomewearGatewayContract.Key.ADDRESS, normalizedAddress) },
         )
         if (accepted is SomewearResult.Failure) return accepted
         return awaitConnected(timeoutMillis ?: config.operationTimeoutMillis)
     }
 
     override suspend fun connectUsb(timeoutMillis: Long?): SomewearResult<DeviceStatus> {
-        val accepted = call(SomewearGatewayContract.Method.CONNECT_USB)
+        // A non-null Bundle keeps connectUsb compatible with gateways whose
+        // legacy dispatcher rejects every null-extras provider call.
+        val accepted = call(SomewearGatewayContract.Method.CONNECT_USB, Bundle())
         if (accepted is SomewearResult.Failure) return accepted
         return awaitConnected(timeoutMillis ?: config.operationTimeoutMillis)
     }
@@ -363,6 +370,13 @@ internal class ContentProviderSomewearClient(
     private fun invalid(method: String, message: String): SomewearResult.Failure =
         SomewearResult.Failure(SomewearError(SomewearErrorCode.INVALID_REQUEST, message, method))
 }
+
+internal fun normalizeBluetoothMacAddress(value: String): String? {
+    val normalized = value.trim().uppercase(Locale.US)
+    return normalized.takeIf { BLUETOOTH_MAC_ADDRESS.matches(it) }
+}
+
+private val BLUETOOTH_MAC_ADDRESS = Regex("(?:[0-9A-F]{2}:){5}[0-9A-F]{2}")
 
 private inline fun <T, R> SomewearResult<T>.map(transform: (T) -> R): SomewearResult<R> = when (this) {
     is SomewearResult.Success -> SomewearResult.Success(transform(value))

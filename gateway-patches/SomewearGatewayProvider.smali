@@ -334,6 +334,10 @@
     return-object v0
 
     :has_address
+    invoke-static {v1}, Lcom/somewearlabs/gateway/GatewayV2;->prepareBluetoothAddress(Ljava/lang/String;)Ljava/lang/String;
+
+    move-result-object v1
+
     invoke-static {}, Lcom/somewearlabs/gateway/SomewearGatewayProvider;->ensureStarted()V
 
     const-string v0, "pending"

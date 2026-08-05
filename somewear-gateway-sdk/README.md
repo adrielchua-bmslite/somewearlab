@@ -116,13 +116,20 @@ when (val result = somewear.initialize()) {
 
 ### Bluetooth connection
 
-The Node must already be bonded in Android Bluetooth settings.
+Pass the Node's Bluetooth MAC address in colon-separated form. The SDK trims it,
+normalizes lower-case hexadecimal, and rejects malformed addresses before IPC.
 
 ```kotlin
 val result = somewear.connectBluetooth("AA:BB:CC:DD:EE:FF")
 ```
 
 `connectBluetooth()` submits the asynchronous gateway connection operation and polls `getDeviceStatus` until connected, rejected, or timed out.
+
+The gateway resolves an explicit valid MAC through Android Bluetooth and seeds
+Somewear Core's device cache before connecting. This prevents the misleading
+`NoKnownDeviceFound` result that occurred when the Node was absent from the
+core's in-memory scan cache. If the Node still needs Android bonding, the core
+can return `PreBondingRequired`; pair it in Android Bluetooth settings and retry.
 
 SC3 only needs `BLUETOOTH_CONNECT` if SC3 itself enumerates bonded devices. The gateway package owns its own Bluetooth permissions because it owns the actual link.
 
@@ -153,6 +160,10 @@ Then call:
 ```kotlin
 val result = somewear.connectUsb(timeoutMillis = 30_000)
 ```
+
+The SDK sends an empty, non-null extras Bundle with `connectUsb()`. This is
+intentional compatibility behavior for gateway builds whose legacy dispatcher
+otherwise reports `Missing extras Bundle` before starting USB discovery.
 
 To return to Bluetooth:
 

@@ -165,6 +165,8 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
 | Native-library/ABI failure | The device is not ARM64 or its required split was omitted. | Use a compatible ARM64 physical device and install `config.arm64_v8a.apk`. |
 | Bluetooth failure | Gateway permissions, bonding, provisioning, or Node reachability is incomplete. | Grant gateway permissions, bond the Node, then inspect `deviceStatus()`. |
+| `NoKnownDeviceFound` for a valid Bluetooth MAC | The installed SDK/gateway predates explicit-MAC cache seeding, or the gateway lacks Nearby devices permission. | Pull the latest repository, re-sign/reinstall all five prepared gateway splits, update the AAR, grant Nearby devices permission, and retry. A Node requiring pairing may then report `PreBondingRequired`. |
+| `Missing extras Bundle` from `connectUsb()` | SC3 is using an older AAR that sends a null provider extras Bundle, or the installed base gateway does not match the handover set. | Update the AAR and re-sign/reinstall all five APKs from `build/signed-splits-v2/`. The current SDK always sends an empty Bundle for USB. |
 
 ## Operational limitations
 

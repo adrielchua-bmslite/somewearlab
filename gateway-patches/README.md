@@ -7,6 +7,8 @@
 - initializes the API-v2 helper;
 - delegates API-v2 calls to `GatewayV2` before the legacy API-v1 dispatcher;
 - retains the legacy Bluetooth and router entry points.
+- normalizes explicit Bluetooth MAC addresses and asks `GatewayV2` to seed the
+  vendor core's private BLE device cache before `toggleScan()`.
 
 `SomewearPlugin.smali` initializes Realm defensively in `Application.onCreate()`
 but deliberately leaves vendor-core configuration to the provider. This avoids

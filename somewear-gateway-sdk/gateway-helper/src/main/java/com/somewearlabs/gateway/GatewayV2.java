@@ -1,5 +1,8 @@
 package com.somewearlabs.gateway;
 
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.os.Bundle;
 
@@ -12,6 +15,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -48,7 +52,9 @@ public final class GatewayV2 {
             if ("getDeliveryStatus".equals(method)) return deliveryStatus(extras);
             if ("pollIncomingMessages".equals(method)) return pollIncoming(extras);
             if ("testInjectIncomingMessage".equals(method)) return injectIncoming(extras);
-            if ("connectUsb".equals(method)) return connectUsb();
+            if ("connectUsb".equals(method)
+                    || "connectUSB".equals(method)
+                    || "connect_usb".equals(method)) return connectUsb();
             if ("setConnectionMode".equals(method)) return setConnectionMode(extras);
             if ("shutdown".equals(method)) return shutdown();
             if ("listWorkspaces".equals(method)
@@ -215,6 +221,51 @@ public final class GatewayV2 {
         findMethod(device.getClass(), "toggleUsbConnect", 2)
                 .invoke(device, false, continuation);
         return ok("USB connection operation accepted");
+    }
+
+    /**
+     * Normalizes a caller-supplied MAC and makes the corresponding Android
+     * BluetoothDevice visible to the vendor core before toggleScan().
+     *
+     * Somewear Core only searches the system bonded-device list and its private
+     * scan cache. Seeding that cache prevents a valid explicit MAC from being
+     * rejected as NoKnownDeviceFound before a connection is attempted.
+     */
+    public static String prepareBluetoothAddress(String address) throws Exception {
+        if (address == null) throw new IllegalArgumentException("Bluetooth address is missing");
+        String normalized = address.trim().toUpperCase(Locale.US);
+        if (!BluetoothAdapter.checkBluetoothAddress(normalized)) {
+            throw new IllegalArgumentException(
+                    "Invalid Bluetooth address; expected AA:BB:CC:DD:EE:FF"
+            );
+        }
+        if (appContext == null) {
+            throw new IllegalStateException("GatewayV2.initialize(Context) was not called");
+        }
+
+        BluetoothManager manager = (BluetoothManager) appContext.getSystemService(
+                Context.BLUETOOTH_SERVICE
+        );
+        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+        if (adapter == null) throw new IllegalStateException("Bluetooth is unavailable on this device");
+        if (!adapter.isEnabled()) throw new IllegalStateException("Bluetooth is disabled");
+
+        final BluetoothDevice device;
+        try {
+            device = adapter.getRemoteDevice(normalized);
+        } catch (SecurityException exception) {
+            throw new SecurityException(
+                    "Grant Nearby devices/Bluetooth permission to the Somewear gateway",
+                    exception
+            );
+        }
+
+        Class<?> cacheClass = Class.forName(
+                "com.somewearlabs.somewearcore.internal.util.BleUtility$Companion$DeviceCache"
+        );
+        Object cache = cacheClass.getField("INSTANCE").get(null);
+        cacheClass.getMethod("putDevice", BluetoothDevice.class).invoke(cache, device);
+        return normalized;
     }
 
     private static Bundle setConnectionMode(Bundle extras) throws Exception {
