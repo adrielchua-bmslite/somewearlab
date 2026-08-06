@@ -424,9 +424,34 @@
     goto :route
 
     :get_raw_payload
+    const-string v0, "sendRaw"
+
+    invoke-virtual {v0, p1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v0
+
+    if-nez v0, :read_raw_payload
+
+    const-string v0, "sendRawToWorkspace"
+
+    invoke-virtual {v0, p1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v0
+
+    if-nez v0, :read_raw_payload
+
+    const-string v0, "sendRawWithParcel"
+
+    invoke-virtual {v0, p1}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z
+
+    move-result v0
+
+    if-eqz v0, :unknown_method
+
+    :read_raw_payload
     const-string v0, "payload"
 
-    invoke-virtual {p3, v0}, Landroid/os/BaseBundle;->getByteArray(Ljava/lang/String;)[B
+    invoke-virtual {p3, v0}, Landroid/os/Bundle;->getByteArray(Ljava/lang/String;)[B
 
     move-result-object v1
 

@@ -74,7 +74,9 @@ public final class Main {
         Path committedApkDir = repoRoot.resolve("build/signed-splits-v2").normalize();
         boolean committedArtifacts = Files.isSameFile(apkDir, committedApkDir);
         if (committedArtifacts) {
+            verifyGatewayProviderSource(repoRoot);
             verifyCommittedHashes(repoRoot);
+            System.out.println("gateway_source_contract=OK");
             System.out.println("committed_hashes=OK");
         } else {
             System.out.println("committed_hashes=SKIPPED (custom APK directory)");
@@ -120,6 +122,30 @@ public final class Main {
             if (!actual.equalsIgnoreCase(fields[0])) {
                 throw new IllegalStateException("SHA-256 mismatch: " + fields[1]);
             }
+        }
+    }
+
+    private static void verifyGatewayProviderSource(Path repoRoot) throws Exception {
+        Path provider = repoRoot.resolve("gateway-patches/SomewearGatewayProvider.smali");
+        requireFile(provider, "gateway provider patch");
+        String source = Files.readString(provider, StandardCharsets.UTF_8);
+        String invalidDescriptor =
+                "Landroid/os/BaseBundle;->getByteArray(Ljava/lang/String;)[B";
+        String validDescriptor =
+                "Landroid/os/Bundle;->getByteArray(Ljava/lang/String;)[B";
+        if (source.contains(invalidDescriptor)) {
+            throw new IllegalStateException(
+                    "gateway provider invokes getByteArray on BaseBundle instead of Bundle"
+            );
+        }
+        if (!source.contains(validDescriptor)) {
+            throw new IllegalStateException("gateway provider Bundle.getByteArray call is missing");
+        }
+        if (!source.contains(":read_raw_payload")
+                || !source.contains("if-eqz v0, :unknown_method")) {
+            throw new IllegalStateException(
+                    "gateway provider must reject unknown methods before reading raw payload extras"
+            );
         }
     }
 
