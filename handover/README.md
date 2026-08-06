@@ -167,7 +167,7 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 | Bluetooth failure | Gateway permissions, bonding, provisioning, or Node reachability is incomplete. | Grant gateway permissions, bond the Node, then inspect `deviceStatus()`. |
 | `NoKnownDeviceFound` for a valid Bluetooth MAC | The installed SDK/gateway predates explicit-MAC cache seeding, or the gateway lacks Nearby devices permission. | Pull the latest repository, re-sign/reinstall all five prepared gateway splits, update the AAR, grant Nearby devices permission, and retry. A Node requiring pairing may then report `PreBondingRequired`. |
 | `Missing extras Bundle` from `connectUsb()` | SC3 is using an older AAR that sends a null provider extras Bundle, or the installed base gateway does not match the handover set. | Update the AAR and re-sign/reinstall all five APKs from `build/signed-splits-v2/`. The current SDK always sends an empty Bundle for USB. |
-| `No virtual method getByteArray` mentioning `BaseBundle` | The installed base gateway contains the older provider dispatcher, which could send an unknown USB-style method into the raw-payload branch and invoke `getByteArray` on the wrong Android class. | Pull the latest repository, run the verifier, re-sign all five prepared splits, and reinstall them together. |
+| `No virtual method getByteArray` mentioning `BaseBundle` | The caller reached an unsupported legacy raw-payload method, normally because the installed base gateway and AAR are from different handover versions. | Pull the latest repository, run the verifier, re-sign all five prepared splits, and reinstall them together. API v2 now blocks legacy raw and unknown methods before vendor-provider dispatch. |
 
 ## Operational limitations
 

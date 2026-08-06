@@ -127,24 +127,34 @@ public final class Main {
 
     private static void verifyGatewayProviderSource(Path repoRoot) throws Exception {
         Path provider = repoRoot.resolve("gateway-patches/SomewearGatewayProvider.smali");
+        Path helper = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/GatewayV2.java"
+        );
         requireFile(provider, "gateway provider patch");
-        String source = Files.readString(provider, StandardCharsets.UTF_8);
-        String invalidDescriptor =
-                "Landroid/os/BaseBundle;->getByteArray(Ljava/lang/String;)[B";
-        String validDescriptor =
-                "Landroid/os/Bundle;->getByteArray(Ljava/lang/String;)[B";
-        if (source.contains(invalidDescriptor)) {
+        requireFile(helper, "gateway v2 helper");
+        String providerSource = Files.readString(provider, StandardCharsets.UTF_8);
+        String helperSource = Files.readString(helper, StandardCharsets.UTF_8);
+        if (providerSource.contains(":read_raw_payload")
+                || providerSource.contains(
+                        "Landroid/os/Bundle;->getByteArray(Ljava/lang/String;)[B"
+                )) {
             throw new IllegalStateException(
-                    "gateway provider invokes getByteArray on BaseBundle instead of Bundle"
+                    "gateway provider no longer matches the last-known-good dispatcher"
             );
         }
-        if (!source.contains(validDescriptor)) {
-            throw new IllegalStateException("gateway provider Bundle.getByteArray call is missing");
+        if (!providerSource.contains(
+                "Landroid/os/BaseBundle;->getByteArray(Ljava/lang/String;)[B"
+        )) {
+            throw new IllegalStateException("last-known-good provider dispatcher is missing");
         }
-        if (!source.contains(":read_raw_payload")
-                || !source.contains("if-eqz v0, :unknown_method")) {
+        if (!helperSource.contains("isLegacyProviderMethod")
+                || !helperSource.contains("\"sendRaw\".equals(method)")
+                || !helperSource.contains("\"sendRawToWorkspace\".equals(method)")
+                || !helperSource.contains("\"sendRawWithParcel\".equals(method)")
+                || !helperSource.contains("Unknown gateway method: ")) {
             throw new IllegalStateException(
-                    "gateway provider must reject unknown methods before reading raw payload extras"
+                    "GatewayV2 must intercept legacy raw and unknown methods before provider dispatch"
             );
         }
     }

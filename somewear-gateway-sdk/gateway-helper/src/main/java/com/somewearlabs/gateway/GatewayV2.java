@@ -62,10 +62,31 @@ public final class GatewayV2 {
                     || "getMeshKeyStatus".equals(method)) {
                 return error("UNSUPPORTED", method + " is not available in this gateway build");
             }
-            return null;
+            // The vendor provider's legacy raw branch contains a method reference that is
+            // unsafe on some Android runtimes. API v2 never exposes these methods, so stop
+            // them here before the hand-written provider dispatcher can reach that branch.
+            if ("sendRaw".equals(method)
+                    || "sendRawToWorkspace".equals(method)
+                    || "sendRawWithParcel".equals(method)) {
+                return error(
+                        "UNSUPPORTED",
+                        "Legacy raw payload methods are not exposed by the SC3 gateway"
+                );
+            }
+            if (isLegacyProviderMethod(method)) return null;
+            return error("UNSUPPORTED", "Unknown gateway method: " + method);
         } catch (Throwable throwable) {
             return error("INTERNAL", rootMessage(throwable));
         }
+    }
+
+    private static boolean isLegacyProviderMethod(String method) {
+        return "activate".equals(method)
+                || "getDeviceStatus".equals(method)
+                || "cancelConnection".equals(method)
+                || "disconnect".equals(method)
+                || "connectBle".equals(method)
+                || "sendMessage".equals(method);
     }
 
     private static Bundle info() {
