@@ -1,2 +1,3 @@
 *.bat text eol=crlf
 *.sh text eol=lf
+/somewear-gateway-sdk/dist/sc3-somewear.gradle.kts text eol=lf
