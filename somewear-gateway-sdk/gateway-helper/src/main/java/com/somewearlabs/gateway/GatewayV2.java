@@ -4,14 +4,17 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
+import android.net.Uri;
 import android.os.Bundle;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -19,6 +22,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * API-v2 adapter injected into the standalone gateway APK.
@@ -29,6 +35,8 @@ import java.util.Set;
 public final class GatewayV2 {
     private static final Object LOCK = new Object();
     private static final int MAX_INCOMING_MESSAGES = 2_000;
+    private static final long DEFAULT_WORKSPACE_TIMEOUT_MS = 45_000L;
+    private static final long MAX_WORKSPACE_TIMEOUT_MS = 120_000L;
     private static final List<Bundle> INCOMING = new ArrayList<>();
     private static final Map<String, Bundle> DELIVERY = new LinkedHashMap<>();
     private static final Map<String, String> TRACE_TO_MESSAGE = new LinkedHashMap<>();
@@ -59,6 +67,22 @@ public final class GatewayV2 {
             if ("setConnectionMode".equals(method)) return setConnectionMode(extras);
             if ("shutdown".equals(method)) return shutdown();
             if ("listWorkspaces".equals(method)) return listWorkspaces();
+            if ("syncWorkspaces".equals(method)) return syncWorkspaces(extras);
+            if ("joinWorkspace".equals(method)) {
+                try {
+                    return joinWorkspace(extras);
+                } catch (Throwable throwable) {
+                    // Never reflect an exception message that could contain invite material.
+                    return error(
+                            "JOIN_FAILED",
+                            "Somewear workspace join failed ("
+                                    + throwable.getClass().getSimpleName() + ")"
+                    );
+                }
+            }
+            if ("getWorkspaceProvisioningStatus".equals(method)) {
+                return workspaceProvisioningStatus();
+            }
             if ("getActiveWorkspace".equals(method)) return getActiveWorkspace();
             if ("activateWorkspace".equals(method)) return activateWorkspace(extras);
             if ("getWorkspaceStatus".equals(method)) return workspaceStatus(extras);
@@ -103,6 +127,10 @@ public final class GatewayV2 {
                 "satellite_only",
                 "delivery_status",
                 "incoming_messages",
+                "workspace_join",
+                "workspace_sync",
+                "workspace_qr_invite",
+                "workspace_provisioning_status",
                 "workspace_list",
                 "workspace_selection",
                 "workspace_status",
@@ -110,6 +138,209 @@ public final class GatewayV2 {
                 "test_injection"
         );
         result.putStringArrayList("capabilities", capabilities);
+        return result;
+    }
+
+    /**
+     * Forces the retained Somewear workspace repository to synchronize with the
+     * service. Unlike listWorkspaces(), this performs network/authentication work.
+     */
+    private static Bundle syncWorkspaces(Bundle extras) throws Exception {
+        ensureCoreStarted();
+        final long timeout = workspaceTimeout(extras);
+        final Object refreshed;
+        try {
+            refreshed = invokeSuspend(genericUserSource(), "refreshWorkspaces", timeout);
+        } catch (SuspendTimeoutException timeoutException) {
+            return error("TIMEOUT", "Timed out while synchronizing Somewear workspaces");
+        }
+        if (Boolean.FALSE.equals(refreshed)) {
+            return error(
+                    "NETWORK_UNAVAILABLE",
+                    "Somewear could not synchronize workspaces; check internet access and authentication"
+            );
+        }
+        Bundle result = listWorkspaces();
+        result.putString("message", "Somewear workspaces synchronized");
+        result.putBoolean("workspace_sync_completed", true);
+        return result;
+    }
+
+    /**
+     * Joins the workspace encoded by a Somewear QR/deep-link invite. The invite
+     * token is consumed in memory and is never returned, persisted, or logged.
+     */
+    private static Bundle joinWorkspace(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String rawInvite = extras.getString("invite_code");
+        if (rawInvite == null || rawInvite.trim().isEmpty()) {
+            return error("INVALID_REQUEST", "invite_code must not be blank");
+        }
+
+        final InviteParts invite;
+        try {
+            invite = InviteParts.parse(rawInvite);
+        } catch (IllegalArgumentException exception) {
+            return error("INVALID_INVITE", exception.getMessage());
+        }
+
+        ensureCoreStarted();
+        if (invite.token != null) {
+            Bundle mismatch = environmentMismatch(invite);
+            if (mismatch != null) return mismatch;
+        }
+
+        long timeout = workspaceTimeout(extras);
+        Object repository = null;
+        try {
+            repository = workspaceRepository();
+            final Object joinResult;
+            try {
+                if (invite.token != null) {
+                    joinResult = invokeSuspend(
+                            repository,
+                            "joinWorkspaceByInviteToken",
+                            timeout,
+                            invite.token
+                    );
+                } else {
+                    final byte[] meshKey;
+                    try {
+                        meshKey = Base64.getDecoder().decode(invite.meshKey);
+                    } catch (IllegalArgumentException exception) {
+                        return error("INVALID_INVITE", "The workspace mesh key is not valid Base64");
+                    }
+                    joinResult = invokeSuspend(
+                            repository,
+                            "createWorkspaceFromMeshKey",
+                            timeout,
+                            invite.workspaceId,
+                            invite.workspaceName == null ? "Somewear Workspace" : invite.workspaceName,
+                            meshKey
+                    );
+                }
+            } catch (SuspendTimeoutException timeoutException) {
+                return error("TIMEOUT", "Timed out while joining the Somewear workspace");
+            }
+
+            String resultName = joinResult == null
+                    ? ""
+                    : joinResult.getClass().getSimpleName();
+            if ("NoConnection".equals(resultName)) {
+                return error(
+                        "NETWORK_UNAVAILABLE",
+                        "Somewear could not reach the workspace service"
+                );
+            }
+            if ("InvalidInput".equals(resultName)) {
+                return error(
+                        "INVALID_INVITE",
+                        "The workspace invite is invalid, expired, or no longer grants access"
+                );
+            }
+            if (!"Success".equals(resultName)) {
+                return error("JOIN_FAILED", "Somewear did not accept the workspace invite");
+            }
+
+            Object response = invokeNoArgs(joinResult, "getResponse");
+            String workspaceId = stringOrNull(invokeNoArgs(response, "getId"));
+            if (workspaceId == null) {
+                return error("MALFORMED_RESPONSE", "Somewear returned a workspace without an ID");
+            }
+            final long numericWorkspaceId;
+            try {
+                numericWorkspaceId = Long.parseLong(workspaceId);
+            } catch (NumberFormatException exception) {
+                return error(
+                        "UNSUPPORTED",
+                        "Joined workspace ID is not numeric and cannot be used by this gateway"
+                );
+            }
+            if (numericWorkspaceId <= 0L) {
+                return error("MALFORMED_RESPONSE", "Somewear returned an invalid workspace ID");
+            }
+
+            // Match the retained ATAK post-join behavior without opening ATAK UI:
+            // make the response active, then refresh the shared workspace cache.
+            invoke(userContextUtil(), "activateWorkspace", response);
+            boolean syncCompleted = false;
+            try {
+                Object refreshed = invokeSuspend(genericUserSource(), "refreshWorkspaces", timeout);
+                syncCompleted = !Boolean.FALSE.equals(refreshed);
+            } catch (SuspendTimeoutException ignored) {
+                // Joining already succeeded and the repository inserted the response locally.
+            }
+
+            Object workspace = findWorkspace(workspaceId);
+            Bundle result = workspace == null
+                    ? workspaceBundleFromResponse(response, numericWorkspaceId)
+                    : workspaceBundle(workspace, activeWorkspaceId());
+            if (result == null) {
+                return error("MALFORMED_RESPONSE", "Joined workspace could not be read from cache");
+            }
+            result.putBoolean("ok", true);
+            result.putString("message", "Workspace joined and activated");
+            result.putBoolean("workspace_sync_completed", syncCompleted);
+            return result;
+        } finally {
+            if (repository != null) {
+                try {
+                    invokeNoArgs(repository, "close");
+                } catch (Throwable ignored) {
+                    // Never replace the real join result with a cleanup failure.
+                }
+            }
+        }
+    }
+
+    private static Bundle workspaceProvisioningStatus() throws Exception {
+        ensureCoreStarted();
+        Object userContext = invokeNoArgs(invokeNoArgs(userContextUtil(), "getUserContext"), "getValue");
+        String uid = stringOrNull(invokeNoArgs(userContext, "getUid"));
+        Object authState = invokeNoArgs(userContext, "getAuthState");
+        String activeId = activeWorkspaceId();
+        Bundle result = ok("Somewear workspace provisioning status");
+        result.putBoolean("authenticated", uid != null);
+        result.putString(
+                "auth_state",
+                authState == null ? "Unknown" : authState.getClass().getSimpleName()
+        );
+        result.putInt("workspace_count", workspaceList().size());
+        result.putBoolean("has_active_workspace", activeId != null);
+        if (activeId != null) result.putString("active_workspace_id_text", activeId);
+        return result;
+    }
+
+    private static Bundle environmentMismatch(InviteParts invite) throws Exception {
+        Object environment = invokeNoArgs(environmentUtil(), "getEnvironmentInfo");
+        String currentHost = String.valueOf(invokeNoArgs(environment, "getGrpcHost"));
+        int currentPort = ((Number) invokeNoArgs(environment, "getGrpcPort")).intValue();
+        boolean currentPlaintext = Boolean.TRUE.equals(invokeNoArgs(environment, "getPlaintext"));
+
+        String targetHost = invite.host == null ? currentHost : invite.host;
+        int targetPort = invite.port < 0 ? currentPort : invite.port;
+        boolean targetPlaintext = invite.plaintext;
+        if (currentHost.equals(targetHost)
+                && currentPort == targetPort
+                && currentPlaintext == targetPlaintext) {
+            return null;
+        }
+        return error(
+                "ENVIRONMENT_MISMATCH",
+                "Invite targets " + targetHost + ":" + targetPort
+                        + " but the gateway is configured for " + currentHost + ":" + currentPort
+        );
+    }
+
+    private static Bundle workspaceBundleFromResponse(Object response, long workspaceId)
+            throws Exception {
+        Bundle result = new Bundle();
+        result.putLong("workspace_id", workspaceId);
+        result.putString("workspace_name", stringOrNull(invokeNoArgs(response, "getName")));
+        result.putBoolean("workspace_member", true);
+        result.putBoolean("workspace_active", true);
+        result.putBoolean("mesh_key_installed", false);
+        result.putBoolean("workspace_ready", false);
         return result;
     }
 
@@ -274,11 +505,28 @@ public final class GatewayV2 {
         return invokeNoArgs(companion, "getInstance");
     }
 
-    private static String activeWorkspaceId() throws Exception {
+    private static Object userContextUtil() throws Exception {
         Class<?> type = Class.forName("com.somewearlabs.somewearshared.auth.UserContextUtil");
         Object companion = type.getField("Companion").get(null);
-        Object userContext = invokeNoArgs(companion, "getInstance");
-        Object workspace = invokeNoArgs(userContext, "getActiveWorkspaceOrNull");
+        return invokeNoArgs(companion, "getInstance");
+    }
+
+    private static Object environmentUtil() throws Exception {
+        Class<?> type = Class.forName("com.somewearlabs.somewearshared.core.util.EnvironmentUtil");
+        Object companion = type.getField("Companion").get(null);
+        return invokeNoArgs(companion, "getInstance");
+    }
+
+    private static Object workspaceRepository() throws Exception {
+        Object factory = invokeNoArgs(genericUserSource(), "getWorkspaceRepositoryFactory");
+        Object contextFlow = invokeNoArgs(userContextUtil(), "getUserContext");
+        Object userContext = invokeNoArgs(contextFlow, "getValue");
+        Object authState = invokeNoArgs(userContext, "getAuthState");
+        return invoke(factory, "build", authState);
+    }
+
+    private static String activeWorkspaceId() throws Exception {
+        Object workspace = invokeNoArgs(userContextUtil(), "getActiveWorkspaceOrNull");
         if (workspace == null) return null;
         Object id = invokeNoArgs(workspace, "getId");
         if (id == null || String.valueOf(id).trim().isEmpty()) return null;
@@ -660,6 +908,97 @@ public final class GatewayV2 {
         return findMethod(target.getClass(), name, 1).invoke(target, argument);
     }
 
+    /**
+     * Calls a Kotlin suspend function reflectively and waits for its Continuation.
+     * Provider calls arrive on a Binder worker and the SC3 SDK also dispatches them
+     * from Dispatchers.IO, so this never blocks either application's UI thread.
+     */
+    private static Object invokeSuspend(
+            Object target,
+            String name,
+            long timeoutMillis,
+            Object... arguments
+    ) throws Exception {
+        Class<?> continuationClass = Class.forName("kotlin.coroutines.Continuation");
+        Class<?> emptyContextClass = Class.forName("kotlin.coroutines.EmptyCoroutineContext");
+        Object emptyContext = emptyContextClass.getField("INSTANCE").get(null);
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<Object> resumedResult = new AtomicReference<>();
+
+        InvocationHandler handler = (proxy, method, args) -> {
+            if ("getContext".equals(method.getName())) return emptyContext;
+            if ("resumeWith".equals(method.getName())) {
+                resumedResult.set(args == null || args.length == 0 ? null : args[0]);
+                completed.countDown();
+                return null;
+            }
+            if ("toString".equals(method.getName())) return "SC3GatewayContinuation";
+            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+            if ("equals".equals(method.getName())) {
+                return args != null && args.length == 1 && proxy == args[0];
+            }
+            return null;
+        };
+        Object continuation = Proxy.newProxyInstance(
+                continuationClass.getClassLoader(),
+                new Class<?>[] { continuationClass },
+                handler
+        );
+
+        Object[] callArguments = new Object[arguments.length + 1];
+        System.arraycopy(arguments, 0, callArguments, 0, arguments.length);
+        callArguments[arguments.length] = continuation;
+
+        final Object immediate;
+        try {
+            immediate = findMethod(target.getClass(), name, callArguments.length)
+                    .invoke(target, callArguments);
+        } catch (InvocationTargetException exception) {
+            throwAsException(exception.getCause());
+            return null;
+        }
+
+        Object suspended = Class.forName("kotlin.coroutines.intrinsics.IntrinsicsKt")
+                .getMethod("getCOROUTINE_SUSPENDED")
+                .invoke(null);
+        if (immediate != suspended) return unwrapKotlinResult(immediate);
+        if (!completed.await(timeoutMillis, TimeUnit.MILLISECONDS)) {
+            throw new SuspendTimeoutException();
+        }
+        return unwrapKotlinResult(resumedResult.get());
+    }
+
+    private static Object unwrapKotlinResult(Object value) throws Exception {
+        try {
+            Class.forName("kotlin.ResultKt")
+                    .getMethod("throwOnFailure", Object.class)
+                    .invoke(null, value);
+            return value;
+        } catch (InvocationTargetException exception) {
+            throwAsException(exception.getCause());
+            return null;
+        }
+    }
+
+    private static void throwAsException(Throwable throwable) throws Exception {
+        if (throwable instanceof Exception) throw (Exception) throwable;
+        if (throwable instanceof Error) throw (Error) throwable;
+        throw new RuntimeException(throwable);
+    }
+
+    private static long workspaceTimeout(Bundle extras) {
+        long requested = extras == null
+                ? DEFAULT_WORKSPACE_TIMEOUT_MS
+                : extras.getLong("workspace_timeout_ms", DEFAULT_WORKSPACE_TIMEOUT_MS);
+        return Math.max(1_000L, Math.min(MAX_WORKSPACE_TIMEOUT_MS, requested));
+    }
+
+    private static String stringOrNull(Object value) {
+        if (value == null) return null;
+        String text = String.valueOf(value).trim();
+        return text.isEmpty() ? null : text;
+    }
+
     private static Method findMethod(Class<?> type, String name, int parameterCount)
             throws NoSuchMethodException {
         for (Class<?> cursor = type; cursor != null; cursor = cursor.getSuperclass()) {
@@ -707,5 +1046,66 @@ public final class GatewayV2 {
         while (cursor.getCause() != null && cursor.getCause() != cursor) cursor = cursor.getCause();
         String message = cursor.getMessage();
         return cursor.getClass().getName() + (message == null ? "" : ": " + message);
+    }
+
+    private static final class SuspendTimeoutException extends Exception {}
+
+    private static final class InviteParts {
+        final String host;
+        final int port;
+        final String token;
+        final String meshKey;
+        final String workspaceId;
+        final String workspaceName;
+        final boolean plaintext;
+
+        private InviteParts(
+                String host,
+                int port,
+                String token,
+                String meshKey,
+                String workspaceId,
+                String workspaceName,
+                boolean plaintext
+        ) {
+            this.host = host;
+            this.port = port;
+            this.token = token;
+            this.meshKey = meshKey;
+            this.workspaceId = workspaceId;
+            this.workspaceName = workspaceName;
+            this.plaintext = plaintext;
+        }
+
+        static InviteParts parse(String rawInvite) {
+            final Uri uri;
+            try {
+                uri = Uri.parse(rawInvite.trim());
+            } catch (Throwable throwable) {
+                throw new IllegalArgumentException("The QR code is not a valid Somewear invite");
+            }
+            String token = stringOrNull(uri.getQueryParameter("token"));
+            String meshKey = stringOrNull(uri.getQueryParameter("meshKey"));
+            String workspaceId = stringOrNull(uri.getQueryParameter("workspaceId"));
+            if ((token == null) == (meshKey == null)) {
+                throw new IllegalArgumentException(
+                        "A Somewear invite must contain exactly one token or meshKey"
+                );
+            }
+            if (meshKey != null && workspaceId == null) {
+                throw new IllegalArgumentException(
+                        "A mesh-key invite must contain workspaceId"
+                );
+            }
+            return new InviteParts(
+                    stringOrNull(uri.getHost()),
+                    uri.getPort(),
+                    token,
+                    meshKey,
+                    workspaceId,
+                    stringOrNull(uri.getQueryParameter("name")),
+                    "true".equals(uri.getQueryParameter("plaintext"))
+            );
+        }
     }
 }

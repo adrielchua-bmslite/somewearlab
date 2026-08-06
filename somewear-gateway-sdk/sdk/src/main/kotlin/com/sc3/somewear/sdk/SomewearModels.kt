@@ -31,6 +31,10 @@ public enum class SomewearErrorCode {
     USB_OPEN_PORT_FAILED,
     USB_INCORRECT_DEVICE,
     GATEWAY_REJECTED,
+    INVALID_INVITE,
+    NETWORK_UNAVAILABLE,
+    ENVIRONMENT_MISMATCH,
+    JOIN_FAILED,
     MALFORMED_RESPONSE,
     INTERNAL,
 }
@@ -161,6 +165,19 @@ public data class WorkspaceInfo(
     val active: Boolean = false,
     val member: Boolean = false,
     val meshKeyInstalled: Boolean = false,
+)
+
+public data class WorkspaceJoinResult(
+    val workspace: WorkspaceStatus,
+    /** False means the invite was accepted but the post-join refresh timed out or was offline. */
+    val syncCompleted: Boolean,
+)
+
+public data class WorkspaceProvisioningStatus(
+    val authenticated: Boolean,
+    val authState: String,
+    val workspaceCount: Int,
+    val hasActiveWorkspace: Boolean,
 )
 
 public data class WorkspaceStatus(

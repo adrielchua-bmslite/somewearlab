@@ -20,6 +20,12 @@ import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.jar.JarEntry;
+import java.util.jar.JarInputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 public final class Main {
     private static final List<String> APK_NAMES = List.of(
@@ -70,6 +76,8 @@ public final class Main {
         apkDir = apkDir.toAbsolutePath().normalize();
         aar = aar.toAbsolutePath().normalize();
         requireFile(aar, "SDK AAR");
+        verifySdkAar(aar);
+        System.out.println("sdk_enrollment_contract=OK");
 
         Path committedApkDir = repoRoot.resolve("build/signed-splits-v2").normalize();
         boolean committedArtifacts = Files.isSameFile(apkDir, committedApkDir);
@@ -167,6 +175,52 @@ public final class Main {
             throw new IllegalStateException(
                     "GatewayV2 must expose retained workspace listing and activation APIs"
             );
+        }
+        if (!helperSource.contains("if (\"joinWorkspace\".equals(method))")
+                || !helperSource.contains("return joinWorkspace(extras)")
+                || !helperSource.contains("if (\"syncWorkspaces\".equals(method))")
+                || !helperSource.contains("joinWorkspaceByInviteToken")
+                || !helperSource.contains("createWorkspaceFromMeshKey")
+                || !helperSource.contains("invokeSuspend")
+                || !helperSource.contains("workspace_qr_invite")) {
+            throw new IllegalStateException(
+                    "GatewayV2 must expose retained QR-invite enrollment and synchronization"
+            );
+        }
+    }
+
+    private static void verifySdkAar(Path aar) throws Exception {
+        Set<String> classes = new HashSet<>();
+        String manifest;
+        try (ZipFile archive = new ZipFile(aar.toFile())) {
+            ZipEntry classesJar = archive.getEntry("classes.jar");
+            ZipEntry manifestEntry = archive.getEntry("AndroidManifest.xml");
+            if (classesJar == null || manifestEntry == null) {
+                throw new IllegalStateException("SDK AAR is missing classes.jar or AndroidManifest.xml");
+            }
+            manifest = new String(
+                    archive.getInputStream(manifestEntry).readAllBytes(),
+                    StandardCharsets.UTF_8
+            );
+            try (JarInputStream jar = new JarInputStream(archive.getInputStream(classesJar))) {
+                JarEntry entry;
+                while ((entry = jar.getNextJarEntry()) != null) classes.add(entry.getName());
+            }
+        }
+        List<String> requiredClasses = List.of(
+                "com/sc3/somewear/sdk/SomewearClient.class",
+                "com/sc3/somewear/sdk/WorkspaceInviteCode.class",
+                "com/sc3/somewear/sdk/WorkspaceQrScanContract.class",
+                "com/sc3/somewear/sdk/WorkspaceQrScannerActivity.class"
+        );
+        for (String requiredClass : requiredClasses) {
+            if (!classes.contains(requiredClass)) {
+                throw new IllegalStateException("SDK AAR is missing " + requiredClass);
+            }
+        }
+        if (!manifest.contains("android.permission.CAMERA")
+                || !manifest.contains("WorkspaceQrScannerActivity")) {
+            throw new IllegalStateException("SDK AAR is missing the QR scanner manifest contract");
         }
     }
 

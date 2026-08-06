@@ -174,6 +174,79 @@ internal class ContentProviderSomewearClient(
         }
     }
 
+    override suspend fun joinWorkspace(
+        inviteCode: String,
+        timeoutMillis: Long?,
+    ): SomewearResult<WorkspaceJoinResult> {
+        if (WorkspaceInviteCode.inspect(inviteCode) == null) {
+            return SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.INVALID_INVITE,
+                    "inviteCode is not a valid Somewear workspace invite",
+                    SomewearGatewayContract.Method.JOIN_WORKSPACE,
+                ),
+            )
+        }
+        val timeout = timeoutMillis ?: config.operationTimeoutMillis.coerceAtLeast(45_000L)
+        if (timeout <= 0L) {
+            return invalid(
+                SomewearGatewayContract.Method.JOIN_WORKSPACE,
+                "timeoutMillis must be positive",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.JOIN_WORKSPACE,
+            Bundle().apply {
+                putString(SomewearGatewayContract.Key.INVITE_CODE, inviteCode)
+                putLong(SomewearGatewayContract.Key.WORKSPACE_TIMEOUT_MS, timeout)
+            },
+        ).map { bundle ->
+            WorkspaceJoinResult(
+                workspace = parseWorkspaceStatus(
+                    bundle,
+                    bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
+                ),
+                syncCompleted = bundle.getBoolean(
+                    SomewearGatewayContract.Key.WORKSPACE_SYNC_COMPLETED,
+                    false,
+                ),
+            )
+        }
+    }
+
+    override suspend fun syncWorkspaces(
+        timeoutMillis: Long?,
+    ): SomewearResult<List<WorkspaceInfo>> {
+        val timeout = timeoutMillis ?: config.operationTimeoutMillis.coerceAtLeast(45_000L)
+        if (timeout <= 0L) {
+            return invalid(
+                SomewearGatewayContract.Method.SYNC_WORKSPACES,
+                "timeoutMillis must be positive",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.SYNC_WORKSPACES,
+            Bundle().apply {
+                putLong(SomewearGatewayContract.Key.WORKSPACE_TIMEOUT_MS, timeout)
+            },
+        ).map { bundle ->
+            bundle.bundleList(SomewearGatewayContract.Key.WORKSPACES).map(::parseWorkspaceInfo)
+        }
+    }
+
+    override suspend fun workspaceProvisioningStatus(): SomewearResult<WorkspaceProvisioningStatus> =
+        call(SomewearGatewayContract.Method.GET_WORKSPACE_PROVISIONING_STATUS).map { bundle ->
+            WorkspaceProvisioningStatus(
+                authenticated = bundle.getBoolean(SomewearGatewayContract.Key.AUTHENTICATED, false),
+                authState = bundle.getString(SomewearGatewayContract.Key.AUTH_STATE) ?: "Unknown",
+                workspaceCount = bundle.getInt(SomewearGatewayContract.Key.WORKSPACE_COUNT, 0),
+                hasActiveWorkspace = bundle.getBoolean(
+                    SomewearGatewayContract.Key.HAS_ACTIVE_WORKSPACE,
+                    false,
+                ),
+            )
+        }
+
     override suspend fun listWorkspaces(): SomewearResult<List<WorkspaceInfo>> =
         call(SomewearGatewayContract.Method.LIST_WORKSPACES).map { bundle ->
             bundle.bundleList(SomewearGatewayContract.Key.WORKSPACES).map(::parseWorkspaceInfo)
@@ -384,6 +457,11 @@ internal class ContentProviderSomewearClient(
             "TIMEOUT" -> SomewearErrorCode.TIMEOUT
             "NOT_FOUND" -> SomewearErrorCode.NOT_FOUND
             "NOT_MEMBER" -> SomewearErrorCode.NOT_MEMBER
+            "INVALID_INVITE" -> SomewearErrorCode.INVALID_INVITE
+            "NETWORK_UNAVAILABLE" -> SomewearErrorCode.NETWORK_UNAVAILABLE
+            "ENVIRONMENT_MISMATCH" -> SomewearErrorCode.ENVIRONMENT_MISMATCH
+            "JOIN_FAILED" -> SomewearErrorCode.JOIN_FAILED
+            "MALFORMED_RESPONSE" -> SomewearErrorCode.MALFORMED_RESPONSE
             "NO_DEVICE_FOUND" -> SomewearErrorCode.USB_NO_DEVICE
             "NO_DEVICE_DRIVER_FOUND" -> SomewearErrorCode.USB_NO_DRIVER
             "USB_PERMISSION_DENIED" -> SomewearErrorCode.USB_PERMISSION_DENIED

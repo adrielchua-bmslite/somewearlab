@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v6. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v7. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -9,9 +9,11 @@
 - retains the legacy Bluetooth and router entry points.
 - normalizes explicit Bluetooth MAC addresses and asks `GatewayV2` to seed the
   vendor core's private BLE device cache before `toggleScan()`.
+- exposes QR-invite workspace join, remote synchronization, provisioning status,
+  and the retained workspace cache without opening ATAK UI.
 - rejects unknown provider methods before reading raw-payload extras and invokes
-  `getByteArray` on `android.os.Bundle` (where Android declares it), not
-  `android.os.BaseBundle`.
+  the last-known-good legacy raw dispatcher only for recognized API-v1 methods;
+  API v2 never exposes raw payload calls.
 
 `SomewearPlugin.smali` initializes Realm defensively in `Application.onCreate()`
 but deliberately leaves vendor-core configuration to the provider. This avoids

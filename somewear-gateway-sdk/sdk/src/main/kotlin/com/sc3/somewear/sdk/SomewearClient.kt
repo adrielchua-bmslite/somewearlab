@@ -30,6 +30,21 @@ public interface SomewearClient : AutoCloseable {
 
     public fun incomingMessages(afterSequence: Long = 0L): Flow<IncomingMessage>
 
+    /**
+     * Join and activate a workspace from the decoded contents of a Somewear QR invite.
+     * The invite is consumed by the gateway and is not retained by this SDK.
+     */
+    public suspend fun joinWorkspace(
+        inviteCode: String,
+        timeoutMillis: Long? = null,
+    ): SomewearResult<WorkspaceJoinResult>
+
+    /** Forces a network/authentication refresh before returning the workspace cache. */
+    public suspend fun syncWorkspaces(
+        timeoutMillis: Long? = null,
+    ): SomewearResult<List<WorkspaceInfo>>
+
+    public suspend fun workspaceProvisioningStatus(): SomewearResult<WorkspaceProvisioningStatus>
     public suspend fun listWorkspaces(): SomewearResult<List<WorkspaceInfo>>
     public suspend fun activeWorkspace(): SomewearResult<WorkspaceInfo?>
     public suspend fun activateWorkspace(workspaceId: Long): SomewearResult<WorkspaceStatus>

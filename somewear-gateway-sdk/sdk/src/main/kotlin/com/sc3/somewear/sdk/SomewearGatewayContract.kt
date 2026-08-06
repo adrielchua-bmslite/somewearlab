@@ -25,6 +25,10 @@ public object SomewearGatewayContract {
         public const val SEND_MESSAGE_V2: String = "sendMessageV2"
         public const val GET_DELIVERY_STATUS: String = "getDeliveryStatus"
         public const val POLL_INCOMING_MESSAGES: String = "pollIncomingMessages"
+        public const val JOIN_WORKSPACE: String = "joinWorkspace"
+        public const val SYNC_WORKSPACES: String = "syncWorkspaces"
+        public const val GET_WORKSPACE_PROVISIONING_STATUS: String =
+            "getWorkspaceProvisioningStatus"
         public const val LIST_WORKSPACES: String = "listWorkspaces"
         public const val GET_ACTIVE_WORKSPACE: String = "getActiveWorkspace"
         public const val ACTIVATE_WORKSPACE: String = "activateWorkspace"
@@ -67,6 +71,9 @@ public object SomewearGatewayContract {
         public const val SENDER_ID: String = "sender_id"
         public const val RECEIVED_AT_MS: String = "received_at_ms"
 
+        public const val INVITE_CODE: String = "invite_code"
+        public const val WORKSPACE_TIMEOUT_MS: String = "workspace_timeout_ms"
+        public const val WORKSPACE_SYNC_COMPLETED: String = "workspace_sync_completed"
         public const val WORKSPACE_NAME: String = "workspace_name"
         public const val WORKSPACE_READY: String = "workspace_ready"
         public const val WORKSPACE_ACTIVE: String = "workspace_active"
@@ -75,5 +82,8 @@ public object SomewearGatewayContract {
         public const val WORKSPACES: String = "workspaces"
         public const val MESH_KEY_INSTALLED: String = "mesh_key_installed"
         public const val MESH_KEY_ID: String = "mesh_key_id"
+        public const val AUTHENTICATED: String = "authenticated"
+        public const val AUTH_STATE: String = "auth_state"
+        public const val WORKSPACE_COUNT: String = "workspace_count"
     }
 }

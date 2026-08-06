@@ -27,14 +27,15 @@ For a complete transfer to another developer, follow [the handover guide](handov
 
 ## Verified status
 
-Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. Workspace listing, active-workspace lookup, activation, readiness, and non-secret mesh-key status are implemented; empty/not-found paths and a retained-cache activation fixture passed Android emulator tests.
+Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. The fresh-install path now includes an SDK-owned offline QR scanner, retained Somewear invite enrollment, remote workspace synchronization, provisioning status, activation, readiness, and non-secret mesh-key status. Scanner/camera launch, authenticated empty-cache sync, and safe backend rejection of an invalid invite passed Android emulator tests.
 
 Physical Bluetooth/USB connection and real radio/satellite delivery still require two provisioned Somewear Nodes for hardware acceptance testing.
 
 ## Artifacts
 
 - Kotlin AAR: `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
-- SDK AAR SHA-256: `7e1d35b0748e765c3fdfe4b6b8d9034cabe2ce6f4ed3cde2c04dd06b32f82325`
+- Local-AAR dependency block: `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts`
+- SDK AAR SHA-256: `9b43a8d8882e892652c1409a310ab1186dac1682b3d26354107e4a5be6e025e9`
 - Gateway base APK: `build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk`
 - Gateway ABI/configuration splits: the other four APKs in `build/signed-splits-v2/`.
 

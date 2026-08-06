@@ -10,6 +10,7 @@ The gateway owns Somewear Core, Bluetooth/USB, radio/satellite routing, storage,
 ## Included material
 
 - `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
+- `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts` (local-AAR dependency block)
 - Five gateway APKs under `build/signed-splits-v2/`
 - `gateway-patches/SomewearGatewayProvider.smali`
 - `gateway-patches/SomewearPlugin.smali`
@@ -131,6 +132,13 @@ The gateway has no launcher activity. The script installs all five splits and at
 
 ## 5. Install SC3 and run the preflight call
 
+When SC3 consumes the checked-in AAR as `implementation(files(...))`, copy
+`somewear-gateway-sdk/dist/sc3-somewear.gradle.kts` beside the AAR and apply it
+from SC3's app module. Also set `android.useAndroidX=true` in SC3's root
+`gradle.properties`. The script adds Activity 1.12.0, CameraX 1.6.1, bundled ML
+Kit barcode 17.3.0, and coroutines; a local AAR does not carry Maven transitive
+dependency metadata.
+
 Install the SC3 APK signed with the same certificate. In SC3, create the client and call `info()` before initialization:
 
 ```kotlin
@@ -152,9 +160,28 @@ content://com.somewearlabs.swtak.plugin.somewear.gateway
 
 Expected API version: `2`.
 
-Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/USB, and send messages.
+Only after `info()` succeeds should SC3 call `initialize()`, enroll/synchronize a workspace, connect Bluetooth/USB, and send messages.
 
-`initialize()` resumes the gateway's already-provisioned Somewear identity; the SDK does not create/join workspaces or accept account credentials. After synchronization, call `listWorkspaces()`, activate one of the returned numeric IDs with `activateWorkspace(id)`, and use that same ID in `SendRequest`.
+On a fresh install, `listWorkspaces()` can correctly return an empty cache. Register the SDK scanner and submit the result to the new enrollment API:
+
+```kotlin
+private val workspaceScanner = registerForActivityResult(
+    WorkspaceQrScanContract(),
+) { scan ->
+    if (scan is WorkspaceQrScanResult.Success) {
+        lifecycleScope.launch {
+            when (val joined = somewear.joinWorkspace(scan.inviteCode)) {
+                is SomewearResult.Success -> persistWorkspaceId(
+                    joined.value.workspace.workspaceId,
+                )
+                is SomewearResult.Failure -> showError(joined.error)
+            }
+        }
+    }
+}
+```
+
+Call `somewear.syncWorkspaces()` to force remote synchronization on an existing installation; `listWorkspaces()` itself reads the retained local cache. Use `workspaceProvisioningStatus()` to distinguish authentication state from an empty cache. The gateway retains authentication and key material; SC3 must not log or store the QR invite.
 
 ## Error guide
 
@@ -165,7 +192,10 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 | `lateinit property instanceProvider has not been initialized` | An original or older ATAK plugin was re-signed/installed without the standalone Somewear bootstrap. | Pull the latest repository, re-sign only `build/signed-splits-v2`, and install all five resulting APKs together. |
 | `Call Realm.init(Context) before creating a RealmConfiguration` | The installed gateway predates the application-level Realm bootstrap. | Pull the latest repository, re-sign `build/signed-splits-v2`, and reinstall all five gateway splits. |
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
-| `NOT_FOUND` from a workspace call | Workspace synchronization has not populated that numeric ID, or the signed-in Somewear identity cannot see it. | Call `initialize()`, wait for authentication/sync, call `listWorkspaces()`, and select an ID returned by that call. |
+| `INVALID_INVITE` | The QR/pasted invite is malformed, expired, revoked, or rejected. | Scan a newly issued Somewear workspace invite and submit it once. Do not log it. |
+| `NETWORK_UNAVAILABLE` or `TIMEOUT` | Workspace join/sync could not reach the Somewear service. | Restore internet access and retry the same operator-approved operation. |
+| `ENVIRONMENT_MISMATCH` | The invite targets a different Somewear backend. | Obtain an invite for the deployed environment; do not silently change production/gov/custom endpoints. |
+| `NOT_FOUND` from a workspace call | Workspace synchronization has not populated that numeric ID, or the signed-in Somewear identity cannot see it. | Call `initialize()`, then `syncWorkspaces()`, and select an ID returned by `listWorkspaces()`; on a fresh install call `joinWorkspace()` first. |
 | `NOT_MEMBER` from `activateWorkspace()` | The synchronized cache contains the workspace but the current Somewear identity is not a member. | Join/provision the identity through approved Somewear tooling, then initialize and synchronize again. |
 | Native-library/ABI failure | The device is not ARM64 or its required split was omitted. | Use a compatible ARM64 physical device and install `config.arm64_v8a.apk`. |
 | Bluetooth failure | Gateway permissions, bonding, provisioning, or Node reachability is incomplete. | Grant gateway permissions, bond the Node, then inspect `deviceStatus()`. |
@@ -176,5 +206,5 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 ## Operational limitations
 
 - Physical radio/satellite delivery still requires provisioned Somewear hardware and compatible workspace/traffic keys.
-- `RADIO_THEN_SATELLITE` remains unsupported. Workspace listing/selection is exposed, but provisioned membership, key transfer, and real peer delivery still require physical acceptance testing.
+- `RADIO_THEN_SATELLITE` remains unsupported. QR enrollment, workspace synchronization, and cache selection are exposed, but a real issued invite, key transfer, and peer delivery still require account/hardware acceptance testing.
 - The gateway artifacts contain vendor-derived code. Keep the repository and downstream artifacts access-controlled and obtain the required Somewear licensing/approval before deployment or redistribution.

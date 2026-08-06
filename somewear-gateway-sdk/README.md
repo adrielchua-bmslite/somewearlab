@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v6 implements standalone initialization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v7 implements standalone initialization, QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -29,9 +29,13 @@ The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. 
 ## Requirements
 
 - Android 8.0/API 26 or newer.
+- AndroidX enabled in the consuming project (`android.useAndroidX=true` in the
+  root `gradle.properties`).
 - Kotlin application or Java application with Kotlin/coroutines dependencies.
 - The Somewear Gateway APK installed on the same Android device.
 - SC3 and the gateway signed with the same certificate.
+- Camera permission in SC3 for the SDK-owned QR scanner. The barcode model is bundled and works offline.
+- Internet access while accepting a service-token invite or synchronizing workspaces.
 - A provisioned Somewear Node and compatible Somewear workspace/mesh keys.
 - For Bluetooth: Android Bluetooth permissions and a bonded Somewear Node.
 - For USB: Android USB-host/OTG support, a data cable, and a Node model that supports USB.
@@ -67,11 +71,30 @@ Alternatively, copy `sdk-release.aar` into SC3's `app/libs/` directory:
 ```kotlin
 dependencies {
     implementation(files("libs/sdk-release.aar"))
+    implementation("androidx.activity:activity-ktx:1.12.0")
+    implementation("androidx.camera:camera-camera2:1.6.1")
+    implementation("androidx.camera:camera-lifecycle:1.6.1")
+    implementation("androidx.camera:camera-view:1.6.1")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 }
 ```
 
-The AAR contributes the gateway permission and Android package-visibility query through manifest merging.
+The checked-in `dist/sc3-somewear.gradle.kts` contains that complete dependency
+block. A colleague can copy it beside the AAR and add this to
+`SC3/app/build.gradle.kts`:
+
+```kotlin
+apply(from = "libs/sc3-somewear.gradle.kts")
+```
+
+The SC3 root `gradle.properties` must include:
+
+```properties
+android.useAndroidX=true
+```
+
+Those AndroidX/ML Kit lines are required when consuming the checked-in AAR as a local file because a standalone AAR cannot carry Maven transitive-dependency metadata. When consuming the SDK from Maven coordinates, the published POM supplies them. The AAR contributes camera/gateway permissions, the scanner activity, and the Android package-visibility query through manifest merging.
 
 ## Create the client
 
@@ -316,6 +339,59 @@ Persist the highest received sequence in SC3. Message UUIDs should also be dedup
 
 ### Workspace and mesh-key readiness
 
+#### Fresh installation: scan and join
+
+Register the scanner once in an SC3 `ComponentActivity` or Fragment:
+
+```kotlin
+private val scanSomewearWorkspace = registerForActivityResult(
+    WorkspaceQrScanContract(),
+) { result ->
+    when (result) {
+        is WorkspaceQrScanResult.Success -> lifecycleScope.launch {
+            when (val joined = somewear.joinWorkspace(result.inviteCode)) {
+                is SomewearResult.Success -> {
+                    val workspaceId = joined.value.workspace.workspaceId
+                    persistWorkspaceId(workspaceId)
+                    renderWorkspace(joined.value.workspace)
+                }
+                is SomewearResult.Failure -> showError(joined.error)
+            }
+        }
+        is WorkspaceQrScanResult.Failure -> showError(result.message)
+        WorkspaceQrScanResult.Cancelled -> Unit
+    }
+}
+```
+
+After `initialize()` succeeds, launch it:
+
+```kotlin
+scanSomewearWorkspace.launch(Unit)
+```
+
+The scanner accepts the same decoded Somewear invitation URI used by the retained Somewear flow: either a service `token`, or a `meshKey` plus `workspaceId`. It returns the decoded invite only to SC3's result callback. Call `joinWorkspace()` immediately; do not log, persist, or place the invite in analytics. The gateway consumes it in memory, calls Somewear's retained repository, activates the joined workspace, and refreshes the shared cache.
+
+To support a paste-code screen as well as the camera, validate and submit the pasted value directly:
+
+```kotlin
+val metadata = WorkspaceInviteCode.inspect(pastedCode) // no token/key in metadata
+if (metadata != null) {
+    val joined = somewear.joinWorkspace(pastedCode)
+}
+```
+
+A service-token invite can be invalid, expired, revoked, offline, or target a different Somewear environment. Handle `INVALID_INVITE`, `NETWORK_UNAVAILABLE`, `TIMEOUT`, and `ENVIRONMENT_MISMATCH` explicitly. `ENVIRONMENT_MISMATCH` is intentionally not switched silently because changing the Somewear backend is an operational/security decision.
+
+#### Existing installation and refresh
+
+Force a network/authentication refresh before reading the local cache when needed:
+
+```kotlin
+val provisioning = somewear.workspaceProvisioningStatus()
+val synchronized = somewear.syncWorkspaces()
+```
+
 ```kotlin
 when (val workspaces = somewear.listWorkspaces()) {
     is SomewearResult.Failure -> showError(workspaces.error)
@@ -341,9 +417,9 @@ val workspace = somewear.workspaceStatus(workspaceId)
 val meshKey = somewear.meshKeyStatus(workspaceId)
 ```
 
-`initialize()` boots Somewear Core and resumes vendor authentication/workspace synchronization using the identity already provisioned in the gateway. Call `listWorkspaces()` after initialization and retry when it initially returns an empty success. `UNSUPPORTED` means an old gateway APK is installed; it does not mean the user has no workspaces.
+`initialize()` boots Somewear Core and resumes the gateway's retained external identity. `listWorkspaces()` is deliberately local-only; `Success(emptyList())` means the cache is empty, not that synchronization ran. On a fresh installation, scan/paste an invite and call `joinWorkspace()`. On an already enrolled installation, call `syncWorkspaces()` before treating the list as current. `UNSUPPORTED` means an old gateway APK is installed.
 
-The SDK discovers and activates existing Somewear workspaces; it does not create a workspace, join an identity to one, or accept Somewear account credentials. Those provisioning steps must be completed through approved Somewear tooling. Once synchronized, `listWorkspaces()` is the source of the numeric `workspaceId` that SC3 passes to `activateWorkspace()` and `SendRequest`.
+The SDK now joins and activates a workspace from an approved Somewear invite; it still does not create Somewear accounts or expose credentials. Once joined/synchronized, `listWorkspaces()` is the source of the numeric `workspaceId` that SC3 passes to `activateWorkspace()` and `SendRequest`.
 
 Workspace activation is not a Bluetooth/USB connection. It selects the signed-in Somewear identity's routing/key context. The gateway refuses to activate a cached workspace when `member == false`. `ready` means the identity is a member and synchronized mesh-key material is present. Both peer Nodes still need compatible workspace/traffic keys for radio communication. `meshKeyStatus()` exposes only a 16-character SHA-256 fingerprint; it never exports key material.
 
@@ -443,6 +519,9 @@ Every method returns a `Bundle` with:
 | `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `accepted_at_ms` |
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
+| `joinWorkspace` | `invite_code`, optional `workspace_timeout_ms` | joined workspace fields, `workspace_sync_completed` |
+| `syncWorkspaces` | optional `workspace_timeout_ms` | `workspaces: ArrayList<Bundle>` |
+| `getWorkspaceProvisioningStatus` | none | `authenticated`, `auth_state`, `workspace_count`, `has_active_workspace` |
 | `listWorkspaces` | none | `workspaces: ArrayList<Bundle>` |
 | `getActiveWorkspace` | none | `has_active_workspace`; when true, workspace fields |
 | `activateWorkspace` | `workspace_id` | workspace fields with `workspace_active=true` |
@@ -463,7 +542,7 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v6 | Validation/work remaining |
+| Capability | Gateway v7 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -473,7 +552,8 @@ delivered_channel: String
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Hardware validation |
 | Delivery status and actual channel | Yes | Hardware validation |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
-| Workspace listing/selection/readiness | Yes | Empty/not-found paths emulator validated; provisioned membership and key transfer require hardware/account validation |
+| QR scanner and invite validation | Yes | Scanner activity/camera launch emulator validated; parser has unit coverage |
+| Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |
 | Foreground/bound service lifetime | No | Recommended |
 
 Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back to the unsafe legacy all-channel send.
