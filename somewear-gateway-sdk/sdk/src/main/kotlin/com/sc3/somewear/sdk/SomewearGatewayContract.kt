@@ -26,6 +26,8 @@ public object SomewearGatewayContract {
         public const val GET_DELIVERY_STATUS: String = "getDeliveryStatus"
         public const val POLL_INCOMING_MESSAGES: String = "pollIncomingMessages"
         public const val LIST_WORKSPACES: String = "listWorkspaces"
+        public const val GET_ACTIVE_WORKSPACE: String = "getActiveWorkspace"
+        public const val ACTIVATE_WORKSPACE: String = "activateWorkspace"
         public const val GET_WORKSPACE_STATUS: String = "getWorkspaceStatus"
         public const val GET_MESH_KEY_STATUS: String = "getMeshKeyStatus"
     }
@@ -67,6 +69,9 @@ public object SomewearGatewayContract {
 
         public const val WORKSPACE_NAME: String = "workspace_name"
         public const val WORKSPACE_READY: String = "workspace_ready"
+        public const val WORKSPACE_ACTIVE: String = "workspace_active"
+        public const val WORKSPACE_MEMBER: String = "workspace_member"
+        public const val HAS_ACTIVE_WORKSPACE: String = "has_active_workspace"
         public const val WORKSPACES: String = "workspaces"
         public const val MESH_KEY_INSTALLED: String = "mesh_key_installed"
         public const val MESH_KEY_ID: String = "mesh_key_id"

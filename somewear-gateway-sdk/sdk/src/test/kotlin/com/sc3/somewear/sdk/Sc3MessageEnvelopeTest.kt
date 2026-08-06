@@ -43,4 +43,20 @@ class Sc3MessageEnvelopeTest {
         assertEquals("RADIO_THEN_SATELLITE", RoutePolicy.RADIO_THEN_SATELLITE.wireValue)
         assertEquals("SATELLITE_ONLY", RoutePolicy.SATELLITE_ONLY.wireValue)
     }
+
+    @Test
+    fun `workspace models expose selection and key readiness separately`() {
+        val workspace = WorkspaceInfo(
+            id = 42L,
+            name = "Operations",
+            ready = true,
+            active = false,
+            member = true,
+            meshKeyInstalled = true,
+        )
+
+        assertTrue(workspace.member)
+        assertTrue(workspace.meshKeyInstalled)
+        assertTrue(!workspace.active)
+    }
 }

@@ -154,6 +154,8 @@ Expected API version: `2`.
 
 Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/USB, and send messages.
 
+`initialize()` resumes the gateway's already-provisioned Somewear identity; the SDK does not create/join workspaces or accept account credentials. After synchronization, call `listWorkspaces()`, activate one of the returned numeric IDs with `activateWorkspace(id)`, and use that same ID in `SendRequest`.
+
 ## Error guide
 
 | Result | Meaning | Resolution |
@@ -163,6 +165,8 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 | `lateinit property instanceProvider has not been initialized` | An original or older ATAK plugin was re-signed/installed without the standalone Somewear bootstrap. | Pull the latest repository, re-sign only `build/signed-splits-v2`, and install all five resulting APKs together. |
 | `Call Realm.init(Context) before creating a RealmConfiguration` | The installed gateway predates the application-level Realm bootstrap. | Pull the latest repository, re-sign `build/signed-splits-v2`, and reinstall all five gateway splits. |
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
+| `NOT_FOUND` from a workspace call | Workspace synchronization has not populated that numeric ID, or the signed-in Somewear identity cannot see it. | Call `initialize()`, wait for authentication/sync, call `listWorkspaces()`, and select an ID returned by that call. |
+| `NOT_MEMBER` from `activateWorkspace()` | The synchronized cache contains the workspace but the current Somewear identity is not a member. | Join/provision the identity through approved Somewear tooling, then initialize and synchronize again. |
 | Native-library/ABI failure | The device is not ARM64 or its required split was omitted. | Use a compatible ARM64 physical device and install `config.arm64_v8a.apk`. |
 | Bluetooth failure | Gateway permissions, bonding, provisioning, or Node reachability is incomplete. | Grant gateway permissions, bond the Node, then inspect `deviceStatus()`. |
 | `NoKnownDeviceFound` for a valid Bluetooth MAC | The installed SDK/gateway predates explicit-MAC cache seeding, or the gateway lacks Nearby devices permission. | Pull the latest repository, re-sign/reinstall all five prepared gateway splits, update the AAR, grant Nearby devices permission, and retry. A Node requiring pairing may then report `PreBondingRequired`. |
@@ -172,5 +176,5 @@ Only after `info()` succeeds should SC3 call `initialize()`, connect Bluetooth/U
 ## Operational limitations
 
 - Physical radio/satellite delivery still requires provisioned Somewear hardware and compatible workspace/traffic keys.
-- `RADIO_THEN_SATELLITE` and workspace/key readiness remain unsupported in gateway v5.
+- `RADIO_THEN_SATELLITE` remains unsupported. Workspace listing/selection is exposed, but provisioned membership, key transfer, and real peer delivery still require physical acceptance testing.
 - The gateway artifacts contain vendor-derived code. Keep the repository and downstream artifacts access-controlled and obtain the required Somewear licensing/approval before deployment or redistribution.

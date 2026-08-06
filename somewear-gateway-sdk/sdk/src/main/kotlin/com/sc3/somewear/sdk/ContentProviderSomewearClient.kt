@@ -179,6 +179,25 @@ internal class ContentProviderSomewearClient(
             bundle.bundleList(SomewearGatewayContract.Key.WORKSPACES).map(::parseWorkspaceInfo)
         }
 
+    override suspend fun activeWorkspace(): SomewearResult<WorkspaceInfo?> =
+        call(SomewearGatewayContract.Method.GET_ACTIVE_WORKSPACE).map { bundle ->
+            if (bundle.getBoolean(SomewearGatewayContract.Key.HAS_ACTIVE_WORKSPACE, false)) {
+                parseWorkspaceInfo(bundle)
+            } else {
+                null
+            }
+        }
+
+    override suspend fun activateWorkspace(workspaceId: Long): SomewearResult<WorkspaceStatus> {
+        if (workspaceId <= 0L) {
+            return invalid(SomewearGatewayContract.Method.ACTIVATE_WORKSPACE, "workspaceId must be positive")
+        }
+        return call(
+            SomewearGatewayContract.Method.ACTIVATE_WORKSPACE,
+            Bundle().apply { putLong(SomewearGatewayContract.Key.WORKSPACE_ID, workspaceId) },
+        ).map { bundle -> parseWorkspaceStatus(bundle, workspaceId) }
+    }
+
     override suspend fun workspaceStatus(workspaceId: Long): SomewearResult<WorkspaceStatus> {
         if (workspaceId <= 0L) {
             return invalid(SomewearGatewayContract.Method.GET_WORKSPACE_STATUS, "workspaceId must be positive")
@@ -186,13 +205,7 @@ internal class ContentProviderSomewearClient(
         return call(
             SomewearGatewayContract.Method.GET_WORKSPACE_STATUS,
             Bundle().apply { putLong(SomewearGatewayContract.Key.WORKSPACE_ID, workspaceId) },
-        ).map { bundle ->
-            WorkspaceStatus(
-                workspaceId = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID, workspaceId),
-                name = bundle.getString(SomewearGatewayContract.Key.WORKSPACE_NAME),
-                ready = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_READY, false),
-            )
-        }
+        ).map { bundle -> parseWorkspaceStatus(bundle, workspaceId) }
     }
 
     override suspend fun meshKeyStatus(workspaceId: Long): SomewearResult<MeshKeyStatus> {
@@ -344,7 +357,23 @@ internal class ContentProviderSomewearClient(
         id = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
         name = bundle.getString(SomewearGatewayContract.Key.WORKSPACE_NAME),
         ready = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_READY, false),
+        active = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_ACTIVE, false),
+        member = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_MEMBER, false),
+        meshKeyInstalled = bundle.getBoolean(SomewearGatewayContract.Key.MESH_KEY_INSTALLED, false),
     )
+
+    private fun parseWorkspaceStatus(bundle: Bundle, fallbackId: Long): WorkspaceStatus =
+        WorkspaceStatus(
+            workspaceId = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID, fallbackId),
+            name = bundle.getString(SomewearGatewayContract.Key.WORKSPACE_NAME),
+            ready = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_READY, false),
+            active = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_ACTIVE, false),
+            member = bundle.getBoolean(SomewearGatewayContract.Key.WORKSPACE_MEMBER, false),
+            meshKeyInstalled = bundle.getBoolean(
+                SomewearGatewayContract.Key.MESH_KEY_INSTALLED,
+                false,
+            ),
+        )
 
     private fun mapErrorCode(bundle: Bundle, message: String): SomewearErrorCode {
         val wireCode = bundle.getString(SomewearGatewayContract.Key.ERROR_CODE)
@@ -353,6 +382,8 @@ internal class ContentProviderSomewearClient(
             "INVALID_REQUEST" -> SomewearErrorCode.INVALID_REQUEST
             "NOT_CONNECTED" -> SomewearErrorCode.NOT_CONNECTED
             "TIMEOUT" -> SomewearErrorCode.TIMEOUT
+            "NOT_FOUND" -> SomewearErrorCode.NOT_FOUND
+            "NOT_MEMBER" -> SomewearErrorCode.NOT_MEMBER
             "NO_DEVICE_FOUND" -> SomewearErrorCode.USB_NO_DEVICE
             "NO_DEVICE_DRIVER_FOUND" -> SomewearErrorCode.USB_NO_DRIVER
             "USB_PERMISSION_DENIED" -> SomewearErrorCode.USB_PERMISSION_DENIED

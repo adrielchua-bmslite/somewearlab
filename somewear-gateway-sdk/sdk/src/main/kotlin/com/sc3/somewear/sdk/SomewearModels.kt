@@ -22,6 +22,8 @@ public enum class SomewearErrorCode {
     NOT_CONNECTED,
     CONNECTION_FAILED,
     TIMEOUT,
+    NOT_FOUND,
+    NOT_MEMBER,
     USB_NO_DEVICE,
     USB_NO_DRIVER,
     USB_PERMISSION_DENIED,
@@ -156,12 +158,18 @@ public data class WorkspaceInfo(
     val id: Long,
     val name: String?,
     val ready: Boolean,
+    val active: Boolean = false,
+    val member: Boolean = false,
+    val meshKeyInstalled: Boolean = false,
 )
 
 public data class WorkspaceStatus(
     val workspaceId: Long,
     val name: String?,
     val ready: Boolean,
+    val active: Boolean = false,
+    val member: Boolean = false,
+    val meshKeyInstalled: Boolean = false,
 )
 
 public data class MeshKeyStatus(

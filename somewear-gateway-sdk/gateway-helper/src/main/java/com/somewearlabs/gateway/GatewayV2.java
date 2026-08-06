@@ -10,6 +10,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
@@ -57,11 +58,11 @@ public final class GatewayV2 {
                     || "connect_usb".equals(method)) return connectUsb();
             if ("setConnectionMode".equals(method)) return setConnectionMode(extras);
             if ("shutdown".equals(method)) return shutdown();
-            if ("listWorkspaces".equals(method)
-                    || "getWorkspaceStatus".equals(method)
-                    || "getMeshKeyStatus".equals(method)) {
-                return error("UNSUPPORTED", method + " is not available in this gateway build");
-            }
+            if ("listWorkspaces".equals(method)) return listWorkspaces();
+            if ("getActiveWorkspace".equals(method)) return getActiveWorkspace();
+            if ("activateWorkspace".equals(method)) return activateWorkspace(extras);
+            if ("getWorkspaceStatus".equals(method)) return workspaceStatus(extras);
+            if ("getMeshKeyStatus".equals(method)) return meshKeyStatus(extras);
             // The vendor provider's legacy raw branch contains a method reference that is
             // unsafe on some Android runtimes. API v2 never exposes these methods, so stop
             // them here before the hand-written provider dispatcher can reach that branch.
@@ -102,10 +103,206 @@ public final class GatewayV2 {
                 "satellite_only",
                 "delivery_status",
                 "incoming_messages",
+                "workspace_list",
+                "workspace_selection",
+                "workspace_status",
+                "mesh_key_status",
                 "test_injection"
         );
         result.putStringArrayList("capabilities", capabilities);
         return result;
+    }
+
+    private static Bundle listWorkspaces() throws Exception {
+        ensureCoreStarted();
+        String activeId = activeWorkspaceId();
+        ArrayList<Bundle> items = new ArrayList<>();
+        int skippedNonNumeric = 0;
+        for (Object workspace : workspaceList()) {
+            Bundle item = workspaceBundle(workspace, activeId);
+            if (item == null) {
+                skippedNonNumeric++;
+            } else {
+                items.add(item);
+            }
+        }
+        Bundle result = ok("Somewear workspace cache");
+        result.putParcelableArrayList("workspaces", items);
+        result.putInt("skipped_non_numeric_workspaces", skippedNonNumeric);
+        return result;
+    }
+
+    private static Bundle getActiveWorkspace() throws Exception {
+        ensureCoreStarted();
+        String activeId = activeWorkspaceId();
+        Bundle result = ok(activeId == null ? "No active workspace" : "Active workspace");
+        if (activeId == null) {
+            result.putBoolean("has_active_workspace", false);
+            return result;
+        }
+        Object workspace = findWorkspace(activeId);
+        if (workspace == null) {
+            return error("NOT_FOUND", "Active workspace is not present in the synchronized cache");
+        }
+        Bundle workspaceResult = workspaceBundle(workspace, activeId);
+        if (workspaceResult == null) {
+            return error("UNSUPPORTED", "Active workspace ID is not numeric: " + activeId);
+        }
+        workspaceResult.putBoolean("ok", true);
+        workspaceResult.putBoolean("has_active_workspace", true);
+        workspaceResult.putString("message", "Active workspace");
+        return workspaceResult;
+    }
+
+    private static Bundle activateWorkspace(Bundle extras) throws Exception {
+        Long workspaceId = requestedWorkspaceId(extras);
+        if (workspaceId == null) {
+            return error("INVALID_REQUEST", "workspace_id must be a positive Long");
+        }
+        ensureCoreStarted();
+        Object workspace = findWorkspace(String.valueOf(workspaceId));
+        if (workspace == null) {
+            return error("NOT_FOUND", "Workspace is not present in the synchronized cache: " + workspaceId);
+        }
+        if (!workspaceMember(workspace)) {
+            return error("NOT_MEMBER", "The signed-in Somewear user is not a member of workspace " + workspaceId);
+        }
+
+        Object userSource = genericUserSource();
+        invoke(userSource, "activateWorkspace", workspace);
+        String activeId = activeWorkspaceId();
+        if (!String.valueOf(workspaceId).equals(activeId)) {
+            return error("INTERNAL", "Somewear Core did not activate workspace " + workspaceId);
+        }
+        Bundle result = workspaceBundle(workspace, activeId);
+        if (result == null) {
+            return error("UNSUPPORTED", "Workspace ID is not numeric: " + workspaceId);
+        }
+        result.putBoolean("ok", true);
+        result.putString("message", "Workspace activated");
+        return result;
+    }
+
+    private static Bundle workspaceStatus(Bundle extras) throws Exception {
+        Long workspaceId = requestedWorkspaceId(extras);
+        if (workspaceId == null) {
+            return error("INVALID_REQUEST", "workspace_id must be a positive Long");
+        }
+        ensureCoreStarted();
+        Object workspace = findWorkspace(String.valueOf(workspaceId));
+        if (workspace == null) {
+            return error("NOT_FOUND", "Workspace is not present in the synchronized cache: " + workspaceId);
+        }
+        Bundle result = workspaceBundle(workspace, activeWorkspaceId());
+        if (result == null) {
+            return error("UNSUPPORTED", "Workspace ID is not numeric: " + workspaceId);
+        }
+        result.putBoolean("ok", true);
+        result.putString("message", "Workspace status");
+        return result;
+    }
+
+    private static Bundle meshKeyStatus(Bundle extras) throws Exception {
+        Long workspaceId = requestedWorkspaceId(extras);
+        if (workspaceId == null) {
+            return error("INVALID_REQUEST", "workspace_id must be a positive Long");
+        }
+        ensureCoreStarted();
+        Object workspace = findWorkspace(String.valueOf(workspaceId));
+        if (workspace == null) {
+            return error("NOT_FOUND", "Workspace is not present in the synchronized cache: " + workspaceId);
+        }
+        byte[] meshKey = workspaceMeshKey(workspace);
+        Bundle result = ok("Workspace mesh-key status");
+        result.putLong("workspace_id", workspaceId);
+        result.putBoolean("mesh_key_installed", meshKey != null && meshKey.length > 0);
+        if (meshKey != null && meshKey.length > 0) {
+            result.putString("mesh_key_id", meshKeyFingerprint(meshKey));
+        }
+        return result;
+    }
+
+    private static Bundle workspaceBundle(Object workspace, String activeId) throws Exception {
+        String id = String.valueOf(invokeNoArgs(workspace, "getWorkspaceId"));
+        final long numericId;
+        try {
+            numericId = Long.parseLong(id);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+        if (numericId <= 0L) return null;
+        boolean member = workspaceMember(workspace);
+        byte[] meshKey = workspaceMeshKey(workspace);
+        boolean keyInstalled = meshKey != null && meshKey.length > 0;
+        Bundle result = new Bundle();
+        result.putLong("workspace_id", numericId);
+        Object name = invokeNoArgs(workspace, "getName");
+        result.putString("workspace_name", name == null ? null : String.valueOf(name));
+        result.putBoolean("workspace_member", member);
+        result.putBoolean("workspace_active", id.equals(activeId));
+        result.putBoolean("mesh_key_installed", keyInstalled);
+        result.putBoolean("workspace_ready", member && keyInstalled);
+        return result;
+    }
+
+    private static Long requestedWorkspaceId(Bundle extras) {
+        if (extras == null || !extras.containsKey("workspace_id")) return null;
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        return workspaceId > 0L ? workspaceId : null;
+    }
+
+    private static List<?> workspaceList() throws Exception {
+        Object list = invokeNoArgs(workspaceCache(), "getWorkspaceList");
+        return list instanceof List ? (List<?>) list : Collections.emptyList();
+    }
+
+    private static Object findWorkspace(String workspaceId) throws Exception {
+        return invoke(workspaceCache(), "findByWorkspaceId", workspaceId);
+    }
+
+    private static Object workspaceCache() throws Exception {
+        Class<?> type = Class.forName(
+                "com.somewearlabs.somewearshared.workspace.SharedWorkspaceCache"
+        );
+        Object singleton = type.getField("INSTANCE").get(null);
+        return invokeNoArgs(singleton, "getInstance");
+    }
+
+    private static Object genericUserSource() throws Exception {
+        Class<?> type = Class.forName("com.somewearlabs.somewearshared.user.GenericUserSource");
+        Object companion = type.getField("Companion").get(null);
+        return invokeNoArgs(companion, "getInstance");
+    }
+
+    private static String activeWorkspaceId() throws Exception {
+        Class<?> type = Class.forName("com.somewearlabs.somewearshared.auth.UserContextUtil");
+        Object companion = type.getField("Companion").get(null);
+        Object userContext = invokeNoArgs(companion, "getInstance");
+        Object workspace = invokeNoArgs(userContext, "getActiveWorkspaceOrNull");
+        if (workspace == null) return null;
+        Object id = invokeNoArgs(workspace, "getId");
+        if (id == null || String.valueOf(id).trim().isEmpty()) return null;
+        return String.valueOf(id);
+    }
+
+    private static boolean workspaceMember(Object workspace) throws Exception {
+        return Boolean.TRUE.equals(invokeNoArgs(workspace, "isMemberOf"));
+    }
+
+    private static byte[] workspaceMeshKey(Object workspace) throws Exception {
+        Object meshKey = invokeNoArgs(workspace, "getMeshKey");
+        return meshKey instanceof byte[] ? (byte[]) meshKey : null;
+    }
+
+    private static String meshKeyFingerprint(byte[] meshKey) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(meshKey);
+        char[] hex = "0123456789abcdef".toCharArray();
+        StringBuilder result = new StringBuilder(16);
+        for (int index = 0; index < 8; index++) {
+            int value = digest[index] & 0xff;
+            result.append(hex[value >>> 4]).append(hex[value & 0x0f]);
+        }
+        return result.toString();
     }
 
     private static Bundle sendMessage(Bundle extras) throws Exception {

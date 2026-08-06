@@ -157,6 +157,17 @@ public final class Main {
                     "GatewayV2 must intercept legacy raw and unknown methods before provider dispatch"
             );
         }
+        if (!helperSource.contains("if (\"listWorkspaces\".equals(method)) return listWorkspaces()")
+                || !helperSource.contains(
+                        "if (\"activateWorkspace\".equals(method)) return activateWorkspace(extras)"
+                )
+                || !helperSource.contains("SharedWorkspaceCache")
+                || !helperSource.contains("GenericUserSource")
+                || !helperSource.contains("getActiveWorkspaceOrNull")) {
+            throw new IllegalStateException(
+                    "GatewayV2 must expose retained workspace listing and activation APIs"
+            );
+        }
     }
 
     private static void resign(

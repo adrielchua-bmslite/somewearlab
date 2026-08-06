@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v5 implements standalone initialization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, and delivery-status polling. Workspace/key readiness and automatic radio-then-satellite fallback remain unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v6 implements standalone initialization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -317,12 +317,37 @@ Persist the highest received sequence in SC3. Message UUIDs should also be dedup
 ### Workspace and mesh-key readiness
 
 ```kotlin
-val workspaces = somewear.listWorkspaces()
+when (val workspaces = somewear.listWorkspaces()) {
+    is SomewearResult.Failure -> showError(workspaces.error)
+    is SomewearResult.Success -> {
+        // Success(emptyList()) means no numeric workspace is currently cached.
+        val selected = workspaces.value.firstOrNull { it.member && it.ready }
+        if (selected == null) {
+            showNoReadyWorkspace()
+        } else {
+            when (val activated = somewear.activateWorkspace(selected.id)) {
+                is SomewearResult.Failure -> showError(activated.error)
+                is SomewearResult.Success -> {
+                    check(activated.value.active)
+                    persistWorkspaceId(activated.value.workspaceId)
+                }
+            }
+        }
+    }
+}
+
+val active = somewear.activeWorkspace()
 val workspace = somewear.workspaceStatus(workspaceId)
 val meshKey = somewear.meshKeyStatus(workspaceId)
 ```
 
-Both peer Nodes need compatible workspace/traffic keys for radio communication. `meshKeyStatus` exposes only readiness and a non-secret identifier; it never exports key material.
+`initialize()` boots Somewear Core and resumes vendor authentication/workspace synchronization using the identity already provisioned in the gateway. Call `listWorkspaces()` after initialization and retry when it initially returns an empty success. `UNSUPPORTED` means an old gateway APK is installed; it does not mean the user has no workspaces.
+
+The SDK discovers and activates existing Somewear workspaces; it does not create a workspace, join an identity to one, or accept Somewear account credentials. Those provisioning steps must be completed through approved Somewear tooling. Once synchronized, `listWorkspaces()` is the source of the numeric `workspaceId` that SC3 passes to `activateWorkspace()` and `SendRequest`.
+
+Workspace activation is not a Bluetooth/USB connection. It selects the signed-in Somewear identity's routing/key context. The gateway refuses to activate a cached workspace when `member == false`. `ready` means the identity is a member and synchronized mesh-key material is present. Both peer Nodes still need compatible workspace/traffic keys for radio communication. `meshKeyStatus()` exposes only a 16-character SHA-256 fingerprint; it never exports key material.
+
+The SC3 API uses positive `Long` workspace IDs because Somewear `MessagePayload` routes using a numeric workspace ID. Client-generated/non-numeric ad-hoc workspaces are omitted from `listWorkspaces()` and cannot be used by this gateway build.
 
 ## Recommended SC3 startup sequence
 
@@ -337,9 +362,9 @@ suspend fun startSomewear(
         is SomewearResult.Success -> Unit
     }
 
-    when (val workspace = client.workspaceStatus(workspaceId)) {
+    when (val workspace = client.activateWorkspace(workspaceId)) {
         is SomewearResult.Failure -> return workspace
-        is SomewearResult.Success -> if (!workspace.value.ready) {
+        is SomewearResult.Success -> if (!workspace.value.active || !workspace.value.ready) {
             return SomewearResult.Failure(
                 SomewearError(
                     SomewearErrorCode.GATEWAY_REJECTED,
@@ -419,7 +444,9 @@ Every method returns a `Bundle` with:
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
 | `listWorkspaces` | none | `workspaces: ArrayList<Bundle>` |
-| `getWorkspaceStatus` | `workspace_id` | `workspace_name`, `workspace_ready` |
+| `getActiveWorkspace` | none | `has_active_workspace`; when true, workspace fields |
+| `activateWorkspace` | `workspace_id` | workspace fields with `workspace_active=true` |
+| `getWorkspaceStatus` | `workspace_id` | `workspace_name`, `workspace_ready`, `workspace_active`, `workspace_member`, `mesh_key_installed` |
 | `getMeshKeyStatus` | `workspace_id` | `mesh_key_installed`, optional `mesh_key_id` |
 
 An incoming-message bundle contains:
@@ -436,7 +463,7 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v5 | Validation/work remaining |
+| Capability | Gateway v6 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -446,7 +473,7 @@ delivered_channel: String
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Hardware validation |
 | Delivery status and actual channel | Yes | Hardware validation |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
-| Workspace/key readiness | No | Export retained repositories |
+| Workspace listing/selection/readiness | Yes | Empty/not-found paths emulator validated; provisioned membership and key transfer require hardware/account validation |
 | Foreground/bound service lifetime | No | Recommended |
 
 Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back to the unsafe legacy all-channel send.

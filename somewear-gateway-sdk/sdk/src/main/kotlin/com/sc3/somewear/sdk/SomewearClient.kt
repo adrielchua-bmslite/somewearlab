@@ -31,6 +31,8 @@ public interface SomewearClient : AutoCloseable {
     public fun incomingMessages(afterSequence: Long = 0L): Flow<IncomingMessage>
 
     public suspend fun listWorkspaces(): SomewearResult<List<WorkspaceInfo>>
+    public suspend fun activeWorkspace(): SomewearResult<WorkspaceInfo?>
+    public suspend fun activateWorkspace(workspaceId: Long): SomewearResult<WorkspaceStatus>
     public suspend fun workspaceStatus(workspaceId: Long): SomewearResult<WorkspaceStatus>
     public suspend fun meshKeyStatus(workspaceId: Long): SomewearResult<MeshKeyStatus>
 
