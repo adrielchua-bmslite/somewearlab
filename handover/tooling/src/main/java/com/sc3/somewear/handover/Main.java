@@ -139,10 +139,29 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/GatewayV2.java"
         );
+        Path scanner = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/WorkspaceQrScannerActivity.java"
+        );
+        Path helperManifest = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/AndroidManifest.xml"
+        );
+        Path sdkBuild = repoRoot.resolve("somewear-gateway-sdk/sdk/build.gradle.kts");
+        Path dependencyScript = repoRoot.resolve(
+                "somewear-gateway-sdk/dist/sc3-somewear.gradle.kts"
+        );
         requireFile(provider, "gateway provider patch");
         requireFile(helper, "gateway v2 helper");
+        requireFile(scanner, "gateway QR scanner source");
+        requireFile(helperManifest, "gateway helper manifest");
+        requireFile(sdkBuild, "SDK build file");
+        requireFile(dependencyScript, "SDK local dependency script");
         String providerSource = Files.readString(provider, StandardCharsets.UTF_8);
         String helperSource = Files.readString(helper, StandardCharsets.UTF_8);
+        String scannerSource = Files.readString(scanner, StandardCharsets.UTF_8);
+        String scannerManifest = Files.readString(helperManifest, StandardCharsets.UTF_8);
+        String sdkDependencies = Files.readString(sdkBuild, StandardCharsets.UTF_8)
+                + Files.readString(dependencyScript, StandardCharsets.UTF_8);
         if (providerSource.contains(":read_raw_payload")
                 || providerSource.contains(
                         "Landroid/os/Bundle;->getByteArray(Ljava/lang/String;)[B"
@@ -182,9 +201,25 @@ public final class Main {
                 || !helperSource.contains("joinWorkspaceByInviteToken")
                 || !helperSource.contains("createWorkspaceFromMeshKey")
                 || !helperSource.contains("invokeSuspend")
-                || !helperSource.contains("workspace_qr_invite")) {
+                || !helperSource.contains("workspace_qr_invite")
+                || !helperSource.contains("workspace_qr_scanner")) {
             throw new IllegalStateException(
                     "GatewayV2 must expose retained QR-invite enrollment and synchronization"
+            );
+        }
+        if (!scannerSource.contains("com.budiyev.android.codescanner.CodeScannerView")
+                || !scannerSource.contains("com.google.zxing.BarcodeFormat")
+                || !scannerSource.contains("EXTRA_INVITE_CODE")
+                || !scannerManifest.contains("WorkspaceQrScannerActivity")
+                || !scannerManifest.contains("permission.SOMEWEAR_GATEWAY")) {
+            throw new IllegalStateException(
+                    "Gateway must host the signature-protected offline QR scanner"
+            );
+        }
+        if (sdkDependencies.contains("com.google.mlkit")
+                || sdkDependencies.contains("androidx.camera")) {
+            throw new IllegalStateException(
+                    "SC3 SDK distribution must not depend on ML Kit or CameraX"
             );
         }
     }
@@ -204,7 +239,16 @@ public final class Main {
             );
             try (JarInputStream jar = new JarInputStream(archive.getInputStream(classesJar))) {
                 JarEntry entry;
-                while ((entry = jar.getNextJarEntry()) != null) classes.add(entry.getName());
+                while ((entry = jar.getNextJarEntry()) != null) {
+                    classes.add(entry.getName());
+                    String classBytes = new String(jar.readAllBytes(), StandardCharsets.ISO_8859_1);
+                    if (classBytes.contains("com/google/mlkit")
+                            || classBytes.contains("androidx/camera")) {
+                        throw new IllegalStateException(
+                                "SDK AAR still references an app-local scanner runtime"
+                        );
+                    }
+                }
             }
         }
         List<String> requiredClasses = List.of(
@@ -218,7 +262,7 @@ public final class Main {
                 throw new IllegalStateException("SDK AAR is missing " + requiredClass);
             }
         }
-        if (!manifest.contains("android.permission.CAMERA")
+        if (manifest.contains("android.permission.CAMERA")
                 || !manifest.contains("WorkspaceQrScannerActivity")) {
             throw new IllegalStateException("SDK AAR is missing the QR scanner manifest contract");
         }

@@ -4,8 +4,11 @@ import android.net.Uri
 
 /** Low-level IPC contract implemented by the separately installed gateway APK. */
 public object SomewearGatewayContract {
+    public const val DEFAULT_PACKAGE: String = "com.somewearlabs.swtak.plugin"
     public const val DEFAULT_AUTHORITY: String =
         "com.somewearlabs.swtak.plugin.somewear.gateway"
+    public const val WORKSPACE_QR_SCANNER_ACTIVITY: String =
+        "com.somewearlabs.gateway.WorkspaceQrScannerActivity"
     public const val PERMISSION: String =
         "com.somewearlabs.swtak.plugin.permission.SOMEWEAR_GATEWAY"
 

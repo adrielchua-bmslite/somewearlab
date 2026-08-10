@@ -135,9 +135,9 @@ The gateway has no launcher activity. The script installs all five splits and at
 When SC3 consumes the checked-in AAR as `implementation(files(...))`, copy
 `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts` beside the AAR and apply it
 from SC3's app module. Also set `android.useAndroidX=true` in SC3's root
-`gradle.properties`. The script adds Activity 1.12.0, CameraX 1.6.1, bundled ML
-Kit barcode 17.3.0, and coroutines; a local AAR does not carry Maven transitive
-dependency metadata.
+`gradle.properties`. The script adds Activity 1.12.0 and coroutines. QR camera
+and decoding now run inside the separately installed gateway, so SC3 must not
+package CameraX or ML Kit for this SDK.
 
 Install the SC3 APK signed with the same certificate. In SC3, create the client and call `info()` before initialization:
 
@@ -195,6 +195,7 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | `INVALID_INVITE` | The QR/pasted invite is malformed, expired, revoked, or rejected. | Scan a newly issued Somewear workspace invite and submit it once. Do not log it. |
 | `NETWORK_UNAVAILABLE` or `TIMEOUT` | Workspace join/sync could not reach the Somewear service. | Restore internet access and retry the same operator-approved operation. |
 | `ENVIRONMENT_MISMATCH` | The invite targets a different Somewear backend. | Obtain an invite for the deployed environment; do not silently change production/gov/custom endpoints. |
+| `NoClassDefFoundError` mentioning `com.google.mlkit` while opening the scanner | SC3 still has the older SDK-owned scanner AAR. | Pull the latest repository, update the AAR, re-sign/reinstall the current five gateway splits, and remove any scanner-specific ML Kit/CameraX workaround. The scanner now runs in the gateway. |
 | `NOT_FOUND` from a workspace call | Workspace synchronization has not populated that numeric ID, or the signed-in Somewear identity cannot see it. | Call `initialize()`, then `syncWorkspaces()`, and select an ID returned by `listWorkspaces()`; on a fresh install call `joinWorkspace()` first. |
 | `NOT_MEMBER` from `activateWorkspace()` | The synchronized cache contains the workspace but the current Somewear identity is not a member. | Join/provision the identity through approved Somewear tooling, then initialize and synchronize again. |
 | Native-library/ABI failure | The device is not ARM64 or its required split was omitted. | Use a compatible ARM64 physical device and install `config.arm64_v8a.apk`. |

@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v7 implements standalone initialization, QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v8 implements standalone initialization, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -34,7 +34,8 @@ The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. 
 - Kotlin application or Java application with Kotlin/coroutines dependencies.
 - The Somewear Gateway APK installed on the same Android device.
 - SC3 and the gateway signed with the same certificate.
-- Camera permission in SC3 for the SDK-owned QR scanner. The barcode model is bundled and works offline.
+- Camera permission granted to the separately installed gateway. SC3 itself does
+  not need CameraX, ML Kit, or a Camera permission for workspace scanning.
 - Internet access while accepting a service-token invite or synchronizing workspaces.
 - A provisioned Somewear Node and compatible Somewear workspace/mesh keys.
 - For Bluetooth: Android Bluetooth permissions and a bonded Somewear Node.
@@ -72,10 +73,6 @@ Alternatively, copy `sdk-release.aar` into SC3's `app/libs/` directory:
 dependencies {
     implementation(files("libs/sdk-release.aar"))
     implementation("androidx.activity:activity-ktx:1.12.0")
-    implementation("androidx.camera:camera-camera2:1.6.1")
-    implementation("androidx.camera:camera-lifecycle:1.6.1")
-    implementation("androidx.camera:camera-view:1.6.1")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
 }
 ```
@@ -94,7 +91,7 @@ The SC3 root `gradle.properties` must include:
 android.useAndroidX=true
 ```
 
-Those AndroidX/ML Kit lines are required when consuming the checked-in AAR as a local file because a standalone AAR cannot carry Maven transitive-dependency metadata. When consuming the SDK from Maven coordinates, the published POM supplies them. The AAR contributes camera/gateway permissions, the scanner activity, and the Android package-visibility query through manifest merging.
+Those Activity/coroutines lines are required when consuming the checked-in AAR as a local file because a standalone AAR cannot carry Maven transitive-dependency metadata. When consuming the SDK from Maven coordinates, the published POM supplies them. The AAR contributes the gateway permission, a dependency-free scanner proxy activity, and the Android package-visibility query through manifest merging. Camera and QR decoding run in the gateway APK using its retained offline scanner runtime.
 
 ## Create the client
 
@@ -370,7 +367,7 @@ After `initialize()` succeeds, launch it:
 scanSomewearWorkspace.launch(Unit)
 ```
 
-The scanner accepts the same decoded Somewear invitation URI used by the retained Somewear flow: either a service `token`, or a `meshKey` plus `workspaceId`. It returns the decoded invite only to SC3's result callback. Call `joinWorkspace()` immediately; do not log, persist, or place the invite in analytics. The gateway consumes it in memory, calls Somewear's retained repository, activates the joined workspace, and refreshes the shared cache.
+The SDK proxy opens a signature-protected activity in the gateway package; SC3 does not load a barcode library. The gateway scanner accepts the same decoded Somewear invitation URI used by the retained Somewear flow: either a service `token`, or a `meshKey` plus `workspaceId`. It returns the decoded invite only to SC3's result callback. Call `joinWorkspace()` immediately; do not log, persist, or place the invite in analytics. The gateway consumes it in memory, calls Somewear's retained repository, activates the joined workspace, and refreshes the shared cache.
 
 To support a paste-code screen as well as the camera, validate and submit the pasted value directly:
 
@@ -542,7 +539,7 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v7 | Validation/work remaining |
+| Capability | Gateway v8 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -552,7 +549,7 @@ delivered_channel: String
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Hardware validation |
 | Delivery status and actual channel | Yes | Hardware validation |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
-| QR scanner and invite validation | Yes | Scanner activity/camera launch emulator validated; parser has unit coverage |
+| QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |
 | Foreground/bound service lifetime | No | Recommended |
 

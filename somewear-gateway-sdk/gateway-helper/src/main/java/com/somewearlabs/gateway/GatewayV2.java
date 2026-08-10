@@ -130,6 +130,7 @@ public final class GatewayV2 {
                 "workspace_join",
                 "workspace_sync",
                 "workspace_qr_invite",
+                "workspace_qr_scanner",
                 "workspace_provisioning_status",
                 "workspace_list",
                 "workspace_selection",

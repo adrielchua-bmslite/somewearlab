@@ -27,7 +27,7 @@ For a complete transfer to another developer, follow [the handover guide](handov
 
 ## Verified status
 
-Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. The fresh-install path now includes an SDK-owned offline QR scanner, retained Somewear invite enrollment, remote workspace synchronization, provisioning status, activation, readiness, and non-secret mesh-key status. Scanner/camera launch, authenticated empty-cache sync, and safe backend rejection of an invalid invite passed Android emulator tests.
+Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. The fresh-install path now includes a signature-protected, gateway-hosted offline QR scanner, retained Somewear invite enrollment, remote workspace synchronization, provisioning status, activation, readiness, and non-secret mesh-key status. A clean SC3 consumer with no ML Kit or CameraX runtime launched the gateway camera successfully; authenticated empty-cache sync and safe backend rejection of an invalid invite also passed Android emulator tests.
 
 Physical Bluetooth/USB connection and real radio/satellite delivery still require two provisioned Somewear Nodes for hardware acceptance testing.
 
@@ -35,7 +35,7 @@ Physical Bluetooth/USB connection and real radio/satellite delivery still requir
 
 - Kotlin AAR: `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
 - Local-AAR dependency block: `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts`
-- SDK AAR SHA-256: `9b43a8d8882e892652c1409a310ab1186dac1682b3d26354107e4a5be6e025e9`
+- SDK AAR SHA-256: `3925d33e471e9a25fb831fcebaedbc8e64a6a28729d34723df478fd0f1f2dca9`
 - Gateway base APK: `build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk`
 - Gateway ABI/configuration splits: the other four APKs in `build/signed-splits-v2/`.
 

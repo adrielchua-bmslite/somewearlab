@@ -11,7 +11,7 @@ public sealed interface WorkspaceQrScanResult {
     public data object Cancelled : WorkspaceQrScanResult
 }
 
-/** Activity Result contract used by SC3 to launch the SDK-owned QR scanner. */
+/** Activity Result contract used by SC3 to launch the gateway-hosted QR scanner. */
 public class WorkspaceQrScanContract : ActivityResultContract<Unit, WorkspaceQrScanResult>() {
     override fun createIntent(context: Context, input: Unit): Intent =
         Intent(context, WorkspaceQrScannerActivity::class.java)

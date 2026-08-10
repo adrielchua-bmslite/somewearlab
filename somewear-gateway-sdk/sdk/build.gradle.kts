@@ -42,11 +42,6 @@ kotlin {
 
 dependencies {
     api("androidx.activity:activity-ktx:1.12.0")
-    api("androidx.camera:camera-camera2:1.6.1")
-    api("androidx.camera:camera-lifecycle:1.6.1")
-    api("androidx.camera:camera-view:1.6.1")
-    // Bundled model: QR scanning works offline and on devices without Play Services.
-    api("com.google.mlkit:barcode-scanning:17.3.0")
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     testImplementation("junit:junit:4.12")
 }

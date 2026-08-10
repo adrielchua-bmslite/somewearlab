@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application android:hasCode="true" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <application android:hasCode="true">
+        <activity
+            android:name="com.somewearlabs.gateway.WorkspaceQrScannerActivity"
+            android:exported="true"
+            android:permission="com.somewearlabs.swtak.plugin.permission.SOMEWEAR_GATEWAY"
+            android:screenOrientation="portrait"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
+    </application>
 </manifest>

@@ -45,6 +45,7 @@ base_apk="$apk_dir/com.somewearlabs.swtak.plugin.apk"
 manifest="$($aapt2 dump xmltree --file AndroidManifest.xml "$base_apk")"
 grep -q 'com.somewearlabs.gateway.SomewearGatewayProvider' <<<"$manifest" || fail "base APK does not declare SomewearGatewayProvider"
 grep -q 'com.somewearlabs.swtak.plugin.somewear.gateway' <<<"$manifest" || fail "base APK has the wrong provider authority"
+grep -q 'com.somewearlabs.gateway.WorkspaceQrScannerActivity' <<<"$manifest" || fail "base APK does not declare the gateway QR scanner"
 
 echo "$(sha256_file "$aar")  somewear-gateway-sdk-0.1.0.aar"
 echo "signer_sha256=$expected_signer"
