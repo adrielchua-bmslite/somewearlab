@@ -1,8 +1,12 @@
 package com.sc3.somewear.sdk
 
 import android.content.Context
+import android.content.ComponentName
+import android.content.Intent
+import android.content.ServiceConnection
 import android.net.Uri
 import android.os.Bundle
+import android.os.IBinder
 import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -17,8 +21,29 @@ internal class ContentProviderSomewearClient(
     context: Context,
     private val config: SomewearSdkConfig,
 ) : SomewearClient {
-    private val resolver = context.contentResolver
+    private val appContext = context.applicationContext
+    private val resolver = appContext.contentResolver
     private val gatewayUri = Uri.parse("content://${config.authority}")
+    private val bindingLock = Any()
+    @Volatile private var bindingRequested = false
+    @Volatile private var serviceConnected = false
+    private val receiveServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            serviceConnected = true
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            serviceConnected = false
+        }
+
+        override fun onBindingDied(name: ComponentName?) {
+            serviceConnected = false
+        }
+
+        override fun onNullBinding(name: ComponentName?) {
+            serviceConnected = false
+        }
+    }
 
     override suspend fun info(): SomewearResult<GatewayInfo> =
         call(SomewearGatewayContract.Method.INFO).map { bundle ->
@@ -32,8 +57,13 @@ internal class ContentProviderSomewearClient(
             )
         }
 
-    override suspend fun initialize(): SomewearResult<Unit> =
-        call(SomewearGatewayContract.Method.INITIALIZE).unit()
+    override suspend fun initialize(): SomewearResult<Unit> {
+        val activated = call(SomewearGatewayContract.Method.INITIALIZE).unit()
+        if (activated is SomewearResult.Failure) return activated
+        val bound = bindReceiveService()
+        if (bound is SomewearResult.Failure) return bound
+        return call(SomewearGatewayContract.Method.START_RECEIVING).unit()
+    }
 
     override suspend fun connectBluetooth(
         macAddress: String,
@@ -174,6 +204,42 @@ internal class ContentProviderSomewearClient(
         }
     }
 
+    override suspend fun receiveHealth(): SomewearResult<ReceiveHealth> =
+        call(SomewearGatewayContract.Method.GET_RECEIVE_HEALTH).map { bundle ->
+            ReceiveHealth(
+                subscriptionActive = bundle.getBoolean(
+                    SomewearGatewayContract.Key.RECEIVE_SUBSCRIPTION_ACTIVE,
+                ),
+                routerCallbackCount = bundle.getLong(
+                    SomewearGatewayContract.Key.ROUTER_CALLBACK_COUNT,
+                ),
+                inboundMessageCount = bundle.getLong(
+                    SomewearGatewayContract.Key.INBOUND_MESSAGE_COUNT,
+                ),
+                ignoredInboundCount = bundle.getLong(
+                    SomewearGatewayContract.Key.IGNORED_INBOUND_COUNT,
+                ),
+                errorCount = bundle.getLong(SomewearGatewayContract.Key.RECEIVE_ERROR_COUNT),
+                lastRouterCallbackAtEpochMillis = bundle.positiveLongOrNull(
+                    SomewearGatewayContract.Key.LAST_ROUTER_CALLBACK_AT_MS,
+                ),
+                lastInboundMessageAtEpochMillis = bundle.positiveLongOrNull(
+                    SomewearGatewayContract.Key.LAST_INBOUND_MESSAGE_AT_MS,
+                ),
+                lastErrorAtEpochMillis = bundle.positiveLongOrNull(
+                    SomewearGatewayContract.Key.LAST_RECEIVE_ERROR_AT_MS,
+                ),
+                lastPayloadType = bundle.getString(
+                    SomewearGatewayContract.Key.LAST_PAYLOAD_TYPE,
+                ),
+                lastError = bundle.getString(SomewearGatewayContract.Key.LAST_RECEIVE_ERROR),
+                queuedIncomingCount = bundle.getInt(
+                    SomewearGatewayContract.Key.QUEUED_INCOMING_COUNT,
+                ),
+                latestSequence = bundle.getLong(SomewearGatewayContract.Key.LATEST_SEQUENCE),
+            )
+        }
+
     override suspend fun joinWorkspace(
         inviteCode: String,
         timeoutMillis: Long?,
@@ -297,7 +363,62 @@ internal class ContentProviderSomewearClient(
         }
     }
 
-    override fun close(): Unit = Unit
+    override fun close() {
+        synchronized(bindingLock) {
+            if (!bindingRequested) return
+            runCatching { appContext.unbindService(receiveServiceConnection) }
+            bindingRequested = false
+            serviceConnected = false
+        }
+    }
+
+    private fun bindReceiveService(): SomewearResult<Unit> = synchronized(bindingLock) {
+        if (bindingRequested) return@synchronized SomewearResult.Success(Unit)
+        val intent = Intent().setComponent(
+            ComponentName(
+                SomewearGatewayContract.DEFAULT_PACKAGE,
+                SomewearGatewayContract.GATEWAY_SERVICE,
+            ),
+        )
+        try {
+            val accepted = appContext.bindService(
+                intent,
+                receiveServiceConnection,
+                Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT,
+            )
+            if (!accepted) {
+                SomewearResult.Failure(
+                    SomewearError(
+                        SomewearErrorCode.GATEWAY_NOT_INSTALLED,
+                        "The installed Somewear gateway does not expose its receive service",
+                        SomewearGatewayContract.Method.INITIALIZE,
+                    ),
+                )
+            } else {
+                bindingRequested = true
+                SomewearResult.Success(Unit)
+            }
+        } catch (exception: SecurityException) {
+            SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.PERMISSION_DENIED,
+                    "SC3 is not authorized to bind the Somewear gateway receive service. " +
+                        "Sign SC3 and all gateway splits with the same certificate.",
+                    SomewearGatewayContract.Method.INITIALIZE,
+                    exception,
+                ),
+            )
+        } catch (exception: Exception) {
+            SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.INTERNAL,
+                    exception.message ?: "Could not bind the Somewear gateway receive service",
+                    SomewearGatewayContract.Method.INITIALIZE,
+                    exception,
+                ),
+            )
+        }
+    }
 
     private suspend fun awaitConnected(timeoutMillis: Long): SomewearResult<DeviceStatus> {
         val deadline = SystemClock.elapsedRealtime() + timeoutMillis
@@ -461,6 +582,7 @@ internal class ContentProviderSomewearClient(
             "NETWORK_UNAVAILABLE" -> SomewearErrorCode.NETWORK_UNAVAILABLE
             "ENVIRONMENT_MISMATCH" -> SomewearErrorCode.ENVIRONMENT_MISMATCH
             "JOIN_FAILED" -> SomewearErrorCode.JOIN_FAILED
+            "RECEIVE_FAILED" -> SomewearErrorCode.RECEIVE_FAILED
             "MALFORMED_RESPONSE" -> SomewearErrorCode.MALFORMED_RESPONSE
             "NO_DEVICE_FOUND" -> SomewearErrorCode.USB_NO_DEVICE
             "NO_DEVICE_DRIVER_FOUND" -> SomewearErrorCode.USB_NO_DRIVER
@@ -504,6 +626,8 @@ private inline fun <reified T : Enum<T>> enumValueOrUnknown(value: String?, unkn
 }
 
 private fun Bundle.optionalInt(key: String): Int? = if (containsKey(key)) getInt(key) else null
+
+private fun Bundle.positiveLongOrNull(key: String): Long? = getLong(key).takeIf { it > 0L }
 
 @Suppress("DEPRECATION")
 private fun Bundle.bundleList(key: String): List<Bundle> =

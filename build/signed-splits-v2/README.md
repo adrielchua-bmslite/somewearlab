@@ -2,7 +2,7 @@
 
 These five APKs form one Android split-package installation for the standalone Somewear gateway. Install or re-sign all five together:
 
-- `com.somewearlabs.swtak.plugin.apk` — base package containing `SomewearGatewayProvider`, the application-level Realm bootstrap, retained Somewear runtime, API-v2 workspace invite enrollment bridge, and signature-protected QR scanner activity.
+- `com.somewearlabs.swtak.plugin.apk` — base package containing `SomewearGatewayProvider`, the application-level Realm bootstrap, retained Somewear runtime, API-v2 workspace invite enrollment bridge, signature-protected QR scanner, and bound receive-lifetime service.
 - `config.arm64_v8a.apk` — ARM64 native libraries.
 - `config.en.apk` — English resources.
 - `config.fr.apk` — French resources.

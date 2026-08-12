@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v8 implements standalone initialization, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v9 implements standalone initialization, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -313,6 +313,11 @@ An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acc
 
 ### Incoming messages
 
+`initialize()` binds the gateway receive service. Keep the same `SomewearClient`
+open and start the collector before asking the peer to transmit. For an
+application-wide receiver, use an application/service-owned coroutine scope
+rather than a short-lived screen scope.
+
 Poll explicitly:
 
 ```kotlin
@@ -333,6 +338,24 @@ lifecycleScope.launch {
 ```
 
 Persist the highest received sequence in SC3. Message UUIDs should also be deduplicated because a radio retry may redeliver application content.
+
+Inspect the physical receive path without exposing message contents or keys:
+
+```kotlin
+when (val health = somewear.receiveHealth()) {
+    is SomewearResult.Success -> logSafeReceiveHealth(health.value)
+    is SomewearResult.Failure -> showError(health.error)
+}
+```
+
+- `subscriptionActive=false`: the matching gateway service is not bound/started.
+- `routerCallbackCount=0` after a peer transmission: the retained core saw no
+  traffic; check both Nodes, active workspace, mesh key, radio channel, and range.
+- `ignoredInboundCount>0`: traffic arrived but was not a Somewear `MessagePayload`
+  (for example ATAK CoT/location traffic is not an SC3 message).
+- `errorCount>0`: inspect `lastError`, which contains only a stage and exception
+  class, never payload data.
+- `queuedIncomingCount>0` while SC3 shows nothing: fix SC3's Flow/cursor/UI path.
 
 ### Workspace and mesh-key readiness
 
@@ -516,6 +539,7 @@ Every method returns a `Bundle` with:
 | `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `accepted_at_ms` |
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
+| `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, queue, and last-event counters |
 | `joinWorkspace` | `invite_code`, optional `workspace_timeout_ms` | joined workspace fields, `workspace_sync_completed` |
 | `syncWorkspaces` | optional `workspace_timeout_ms` | `workspaces: ArrayList<Bundle>` |
 | `getWorkspaceProvisioningStatus` | none | `authenticated`, `auth_state`, `workspace_count`, `has_active_workspace` |
@@ -539,19 +563,19 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v8 | Validation/work remaining |
+| Capability | Gateway v9 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
 | USB connection initiation | Yes | Hardware validation |
 | Change Node to USB/LineIn mode | Yes | Hardware validation; Bluetooth restore not exported |
 | Explicit radio/satellite `SendOptions` | Yes | Hardware validation |
-| Inbound `SomewearRouter.getPayload()` bridge | Yes | Hardware validation |
+| Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
 | Delivery status and actual channel | Yes | Hardware validation |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
 | QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |
-| Foreground/bound service lifetime | No | Recommended |
+| Bound service lifetime | Yes | Android idle/frozen-provider regression validated; keep `SomewearClient` open |
 
 Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back to the unsafe legacy all-channel send.
 

@@ -1,8 +1,8 @@
-021e50a05faa59cf0396922318e47757f51d8f67d8039e1a20b8a62ccd8e9bb6  build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk
+6d1ee3eae2a2bb6559d64520527d16f830593645cd0e295c887f4861ebfd504f  build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk
 b31921050d7712e6dc484a76ff1d0d078a544836c8476fbcc31de10dea9b2cd9  build/signed-splits-v2/config.arm64_v8a.apk
 a712a2888693d567de9be177134e157163827f42aeb0a4cd6ffa3d591c7bad32  build/signed-splits-v2/config.en.apk
 ac51f3762567e3707fae0639bb525d1e8dabacc3aed0eb3bd0fbb60b2acbd846  build/signed-splits-v2/config.fr.apk
 a25596b0e42424493f9f974841c4c534dc15f444b593e744666ca3bbbeb3a2ee  build/signed-splits-v2/config.mdpi.apk
-3925d33e471e9a25fb831fcebaedbc8e64a6a28729d34723df478fd0f1f2dca9  somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar
+b3a5f279efc480ebafc4a03a203ed25c7ae294cd9014eca7e57b72f650eb31a8  somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar
 2ca6ebe2830193ffeffe71de1ab07817f1bdeab6efc0f21889ce87a3ced5fb82  somewear-gateway-sdk/dist/sc3-somewear.gradle.kts
-95cbe81fc3b6532462060d12e7f38196323243125618052d84812264aa3aa0d1  handover/dist/somewear-handover-tools.jar
+9755ef7699b7e833c03681b5f15c1124710d99ba4a2dfa9bed21a66316c2a026  handover/dist/somewear-handover-tools.jar

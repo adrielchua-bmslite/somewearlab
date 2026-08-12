@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v8. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v9. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -13,6 +13,10 @@
   and the retained workspace cache without opening ATAK UI.
 - hosts `WorkspaceQrScannerActivity` in the gateway process, reusing the retained
   offline Code Scanner/ZXing runtime without exposing ML Kit or CameraX to SC3.
+- exposes `SomewearGatewayService` under the signature permission so SC3 can
+  keep the router subscription alive while its `SomewearClient` is open.
+- reports non-secret subscription/callback/error counters through
+  `getReceiveHealth`; callback exceptions are no longer silently swallowed.
 - rejects unknown provider methods before reading raw-payload extras and invokes
   the last-known-good legacy raw dispatcher only for recognized API-v1 methods;
   API v2 never exposes raw payload calls.
@@ -33,7 +37,7 @@ somewear-gateway-sdk/gateway-helper/src/main/java/com/somewearlabs/gateway/Gatew
 
 The helper module builds a temporary APK so its DEX can be converted to smali and inserted into the separately decoded gateway. The original vendor APK and full decoded tree are intentionally not committed.
 
-The prepared base APK manifest exports
-`com.somewearlabs.gateway.WorkspaceQrScannerActivity` under the existing
-signature-level `SOMEWEAR_GATEWAY` permission. The readable activity source and
-matching manifest declaration live in the `gateway-helper` module.
+The prepared base APK manifest exports `WorkspaceQrScannerActivity` and
+`SomewearGatewayService` under the existing signature-level `SOMEWEAR_GATEWAY`
+permission. Their readable sources and matching manifest declarations live in
+the `gateway-helper` module.

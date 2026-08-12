@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Bundle;
+import android.util.Log;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -33,6 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * redistributing or linking a proprietary Somewear SDK at build time.
  */
 public final class GatewayV2 {
+    private static final String LOG_TAG = "SC3-Somewear-Gateway";
     private static final Object LOCK = new Object();
     private static final int MAX_INCOMING_MESSAGES = 2_000;
     private static final long DEFAULT_WORKSPACE_TIMEOUT_MS = 45_000L;
@@ -44,6 +46,15 @@ public final class GatewayV2 {
     private static Context appContext;
     private static Object payloadSubscription;
     private static long nextSequence = 1L;
+    private static long routerCallbackCount;
+    private static long inboundMessageCount;
+    private static long ignoredInboundCount;
+    private static long receiveErrorCount;
+    private static long lastRouterCallbackAt;
+    private static long lastInboundMessageAt;
+    private static long lastReceiveErrorAt;
+    private static String lastPayloadType;
+    private static String lastReceiveError;
 
     private GatewayV2() {}
 
@@ -60,7 +71,10 @@ public final class GatewayV2 {
             if ("sendMessageV2".equals(method)) return sendMessage(extras);
             if ("getDeliveryStatus".equals(method)) return deliveryStatus(extras);
             if ("pollIncomingMessages".equals(method)) return pollIncoming(extras);
+            if ("getReceiveHealth".equals(method)) return receiveHealth();
+            if ("startReceiving".equals(method)) return startReceivingResult();
             if ("testInjectIncomingMessage".equals(method)) return injectIncoming(extras);
+            if ("testDispatchRouterMessage".equals(method)) return dispatchTestRouterMessage(extras);
             if ("connectUsb".equals(method)
                     || "connectUSB".equals(method)
                     || "connect_usb".equals(method)) return connectUsb();
@@ -127,6 +141,7 @@ public final class GatewayV2 {
                 "satellite_only",
                 "delivery_status",
                 "incoming_messages",
+                "receive_health",
                 "workspace_join",
                 "workspace_sync",
                 "workspace_qr_invite",
@@ -666,6 +681,25 @@ public final class GatewayV2 {
         return result;
     }
 
+    private static Bundle receiveHealth() {
+        Bundle result = ok("Gateway receive health");
+        synchronized (LOCK) {
+            result.putBoolean("receive_subscription_active", payloadSubscription != null);
+            result.putLong("router_callback_count", routerCallbackCount);
+            result.putLong("inbound_message_count", inboundMessageCount);
+            result.putLong("ignored_inbound_count", ignoredInboundCount);
+            result.putLong("receive_error_count", receiveErrorCount);
+            result.putLong("last_router_callback_at_ms", lastRouterCallbackAt);
+            result.putLong("last_inbound_message_at_ms", lastInboundMessageAt);
+            result.putLong("last_receive_error_at_ms", lastReceiveErrorAt);
+            result.putString("last_payload_type", lastPayloadType);
+            result.putString("last_receive_error", lastReceiveError);
+            result.putInt("queued_incoming_count", INCOMING.size());
+            result.putLong("latest_sequence", nextSequence - 1L);
+        }
+        return result;
+    }
+
     /** Signature-protected test hook used only to validate the Android IPC pipeline. */
     private static Bundle injectIncoming(Bundle extras) {
         if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
@@ -677,6 +711,61 @@ public final class GatewayV2 {
         String channel = extras.getString("delivered_channel", "RADIO");
         enqueueIncoming(messageId, content, workspaceId, senderId, channel, System.currentTimeMillis());
         return ok("Test message injected");
+    }
+
+    /** Exercises the same reflective RouterPayload parser used by physical receive callbacks. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Bundle dispatchTestRouterMessage(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String content = requiredString(extras, "message");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        long sourceUserId = extras.getLong("sender_id_long", 42L);
+
+        Class<?> messageClass = Class.forName(
+                "com.somewearlabs.somewearcore.api.MessagePayload"
+        );
+        Object payload = messageClass
+                .getMethod("build", String.class, long.class)
+                .invoke(null, content, workspaceId);
+        Object oldInfo = invokeNoArgs(payload, "getRoutingInfo");
+        Class<?> channelClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.DevicePayloadChannel"
+        );
+        Class<?> statusClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.DevicePayloadStatus"
+        );
+        Object channel = Enum.valueOf((Class<? extends Enum>) channelClass, "Radio");
+        Object status = Enum.valueOf((Class<? extends Enum>) statusClass, "Delivered");
+        Object inboundInfo = findMethod(oldInfo.getClass(), "copy", 12).invoke(
+                oldInfo,
+                ((Number) invokeNoArgs(oldInfo, "getParcelId")).intValue(),
+                false,
+                sourceUserId,
+                false,
+                0L,
+                workspaceId,
+                channel,
+                status,
+                invokeNoArgs(oldInfo, "getHotspotId"),
+                System.currentTimeMillis(),
+                false,
+                null
+        );
+        invoke(payload, "setRoutingInfo", inboundInfo);
+
+        Class<?> routerPayloadClass = Class.forName(
+                "com.somewearlabs.somewearcore.api.RouterPayload"
+        );
+        Object routerPayload = routerPayloadClass
+                .getConstructor(
+                        Class.forName("com.somewearlabs.somewearcore.api.DevicePayload"),
+                        statusClass,
+                        channelClass
+                )
+                .newInstance(payload, status, channel);
+        handleRouterPayload(routerPayload);
+        return ok("Test RouterPayload dispatched");
     }
 
     private static Bundle connectUsb() throws Exception {
@@ -752,6 +841,18 @@ public final class GatewayV2 {
     }
 
     private static Bundle shutdown() throws Exception {
+        Object subscription;
+        synchronized (LOCK) {
+            subscription = payloadSubscription;
+            payloadSubscription = null;
+        }
+        if (subscription != null) {
+            try {
+                invokeNoArgs(subscription, "dispose");
+            } catch (Throwable ignored) {
+                // Core teardown below remains authoritative.
+            }
+        }
         Class<?> configClass = Class.forName("com.somewearlabs.ataklibs.config.SomewearConfig");
         Object config = configClass.getField("INSTANCE").get(null);
         findMethod(configClass, "destroy", 1).invoke(config, new Object[] { null });
@@ -763,6 +864,32 @@ public final class GatewayV2 {
         Method method = provider.getDeclaredMethod("ensureStarted");
         method.setAccessible(true);
         method.invoke(null);
+    }
+
+    /** Starts the core and inbound subscription without exposing vendor objects. */
+    public static void startReceiving() {
+        startReceivingResult();
+    }
+
+    private static Bundle startReceivingResult() {
+        try {
+            ensureCoreStarted();
+            ensurePayloadSubscription();
+            return ok("Gateway receive subscription active");
+        } catch (Throwable error) {
+            recordReceiveError("SUBSCRIBE", error);
+            return error(
+                    "RECEIVE_FAILED",
+                    "Could not start the gateway receive subscription ("
+                            + rootClassName(error) + ")"
+            );
+        }
+    }
+
+    private static String rootClassName(Throwable error) {
+        Throwable root = error;
+        while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+        return root.getClass().getSimpleName();
     }
 
     private static void ensurePayloadSubscription() throws Exception {
@@ -790,8 +917,15 @@ public final class GatewayV2 {
     }
 
     private static void handleRouterPayload(Object routerPayload) {
+        synchronized (LOCK) {
+            routerCallbackCount++;
+            lastRouterCallbackAt = System.currentTimeMillis();
+        }
         try {
             Object payload = invokeNoArgs(routerPayload, "getPayload");
+            synchronized (LOCK) {
+                lastPayloadType = payload == null ? null : payload.getClass().getName();
+            }
             boolean outbound = (Boolean) invokeNoArgs(payload, "isOutbound");
             String channel = String.valueOf(invokeNoArgs(routerPayload, "getDeliveredDeviceChannel"));
             String status = String.valueOf(invokeNoArgs(routerPayload, "getSummaryStatus"));
@@ -825,7 +959,12 @@ public final class GatewayV2 {
                 return;
             }
 
-            if (!payload.getClass().getName().endsWith(".MessagePayload")) return;
+            if (!payload.getClass().getName().endsWith(".MessagePayload")) {
+                synchronized (LOCK) {
+                    ignoredInboundCount++;
+                }
+                return;
+            }
             String content = String.valueOf(invokeNoArgs(payload, "getContent"));
             long workspaceId = ((Number) invokeNoArgs(payload, "getWorkspaceId")).longValue();
             long sourceUserId = ((Number) invokeNoArgs(payload, "getSourceUserId")).longValue();
@@ -838,9 +977,20 @@ public final class GatewayV2 {
                     channel.toUpperCase(),
                     timestamp == null ? now : timestamp.getTime()
             );
-        } catch (Throwable ignored) {
-            // Router callbacks must never crash the gateway process.
+        } catch (Throwable error) {
+            // Never include payload content or exception messages in diagnostics.
+            recordReceiveError("PARSE", error);
         }
+    }
+
+    private static void recordReceiveError(String stage, Throwable error) {
+        String safeError = stage + ":" + rootClassName(error);
+        synchronized (LOCK) {
+            receiveErrorCount++;
+            lastReceiveErrorAt = System.currentTimeMillis();
+            lastReceiveError = safeError;
+        }
+        Log.w(LOG_TAG, "Receive pipeline failure " + safeError);
     }
 
     private static void enqueueIncoming(
@@ -861,6 +1011,8 @@ public final class GatewayV2 {
             item.putLong("received_at_ms", receivedAt);
             item.putString("delivered_channel", channel);
             INCOMING.add(item);
+            inboundMessageCount++;
+            lastInboundMessageAt = receivedAt;
             while (INCOMING.size() > MAX_INCOMING_MESSAGES) INCOMING.remove(0);
         }
     }

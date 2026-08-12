@@ -3,6 +3,11 @@
     <uses-permission android:name="android.permission.CAMERA" />
 
     <application android:hasCode="true">
+        <service
+            android:name="com.somewearlabs.gateway.SomewearGatewayService"
+            android:exported="true"
+            android:permission="com.somewearlabs.swtak.plugin.permission.SOMEWEAR_GATEWAY" />
+
         <activity
             android:name="com.somewearlabs.gateway.WorkspaceQrScannerActivity"
             android:exported="true"

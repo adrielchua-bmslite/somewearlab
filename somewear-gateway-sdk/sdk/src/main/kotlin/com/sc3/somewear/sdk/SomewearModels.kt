@@ -35,6 +35,7 @@ public enum class SomewearErrorCode {
     NETWORK_UNAVAILABLE,
     ENVIRONMENT_MISMATCH,
     JOIN_FAILED,
+    RECEIVE_FAILED,
     MALFORMED_RESPONSE,
     INTERNAL,
 }
@@ -156,6 +157,22 @@ public data class IncomingMessage(
     val senderId: String?,
     val receivedAtEpochMillis: Long,
     val channel: DeviceChannel,
+)
+
+/** Safe receive-pipeline telemetry. It never contains payload or workspace secrets. */
+public data class ReceiveHealth(
+    val subscriptionActive: Boolean,
+    val routerCallbackCount: Long,
+    val inboundMessageCount: Long,
+    val ignoredInboundCount: Long,
+    val errorCount: Long,
+    val lastRouterCallbackAtEpochMillis: Long?,
+    val lastInboundMessageAtEpochMillis: Long?,
+    val lastErrorAtEpochMillis: Long?,
+    val lastPayloadType: String?,
+    val lastError: String?,
+    val queuedIncomingCount: Int,
+    val latestSequence: Long,
 )
 
 public data class WorkspaceInfo(

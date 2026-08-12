@@ -30,6 +30,9 @@ public interface SomewearClient : AutoCloseable {
 
     public fun incomingMessages(afterSequence: Long = 0L): Flow<IncomingMessage>
 
+    /** Non-secret counters showing whether the gateway is subscribed and seeing router traffic. */
+    public suspend fun receiveHealth(): SomewearResult<ReceiveHealth>
+
     /**
      * Join and activate a workspace from the decoded contents of a Somewear QR invite.
      * The invite is consumed by the gateway and is not retained by this SDK.
@@ -51,6 +54,6 @@ public interface SomewearClient : AutoCloseable {
     public suspend fun workspaceStatus(workspaceId: Long): SomewearResult<WorkspaceStatus>
     public suspend fun meshKeyStatus(workspaceId: Long): SomewearResult<MeshKeyStatus>
 
-    /** Releases SDK-side resources. This does not stop the gateway process. */
+    /** Releases SDK resources and the bound gateway receive-lifetime anchor. */
     override fun close()
 }

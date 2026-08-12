@@ -143,6 +143,10 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/WorkspaceQrScannerActivity.java"
         );
+        Path receiveService = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/SomewearGatewayService.java"
+        );
         Path helperManifest = repoRoot.resolve(
                 "somewear-gateway-sdk/gateway-helper/src/main/AndroidManifest.xml"
         );
@@ -153,12 +157,14 @@ public final class Main {
         requireFile(provider, "gateway provider patch");
         requireFile(helper, "gateway v2 helper");
         requireFile(scanner, "gateway QR scanner source");
+        requireFile(receiveService, "gateway bound receive service source");
         requireFile(helperManifest, "gateway helper manifest");
         requireFile(sdkBuild, "SDK build file");
         requireFile(dependencyScript, "SDK local dependency script");
         String providerSource = Files.readString(provider, StandardCharsets.UTF_8);
         String helperSource = Files.readString(helper, StandardCharsets.UTF_8);
         String scannerSource = Files.readString(scanner, StandardCharsets.UTF_8);
+        String receiveServiceSource = Files.readString(receiveService, StandardCharsets.UTF_8);
         String scannerManifest = Files.readString(helperManifest, StandardCharsets.UTF_8);
         String sdkDependencies = Files.readString(sdkBuild, StandardCharsets.UTF_8)
                 + Files.readString(dependencyScript, StandardCharsets.UTF_8);
@@ -202,7 +208,11 @@ public final class Main {
                 || !helperSource.contains("createWorkspaceFromMeshKey")
                 || !helperSource.contains("invokeSuspend")
                 || !helperSource.contains("workspace_qr_invite")
-                || !helperSource.contains("workspace_qr_scanner")) {
+                || !helperSource.contains("workspace_qr_scanner")
+                || !helperSource.contains("receive_health")
+                || !helperSource.contains("getReceiveHealth")
+                || !helperSource.contains("startReceiving")
+                || !helperSource.contains("recordReceiveError")) {
             throw new IllegalStateException(
                     "GatewayV2 must expose retained QR-invite enrollment and synchronization"
             );
@@ -214,6 +224,14 @@ public final class Main {
                 || !scannerManifest.contains("permission.SOMEWEAR_GATEWAY")) {
             throw new IllegalStateException(
                     "Gateway must host the signature-protected offline QR scanner"
+            );
+        }
+        if (!receiveServiceSource.contains("GatewayV2.startReceiving()")
+                || !scannerManifest.contains("SomewearGatewayService")
+                || !scannerManifest.contains("android:exported=\"true\"")
+                || !scannerManifest.contains("permission.SOMEWEAR_GATEWAY")) {
+            throw new IllegalStateException(
+                    "Gateway must host the signature-protected bound receive service"
             );
         }
         if (sdkDependencies.contains("com.google.mlkit")
@@ -253,6 +271,7 @@ public final class Main {
         }
         List<String> requiredClasses = List.of(
                 "com/sc3/somewear/sdk/SomewearClient.class",
+                "com/sc3/somewear/sdk/ReceiveHealth.class",
                 "com/sc3/somewear/sdk/WorkspaceInviteCode.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScanContract.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScannerActivity.class"

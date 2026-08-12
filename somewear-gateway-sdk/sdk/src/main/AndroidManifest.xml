@@ -3,6 +3,7 @@
     <uses-permission android:name="com.somewearlabs.swtak.plugin.permission.SOMEWEAR_GATEWAY" />
 
     <queries>
+        <package android:name="com.somewearlabs.swtak.plugin" />
         <provider android:authorities="com.somewearlabs.swtak.plugin.somewear.gateway" />
     </queries>
 

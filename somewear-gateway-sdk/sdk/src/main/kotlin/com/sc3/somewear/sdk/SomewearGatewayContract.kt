@@ -9,6 +9,8 @@ public object SomewearGatewayContract {
         "com.somewearlabs.swtak.plugin.somewear.gateway"
     public const val WORKSPACE_QR_SCANNER_ACTIVITY: String =
         "com.somewearlabs.gateway.WorkspaceQrScannerActivity"
+    public const val GATEWAY_SERVICE: String =
+        "com.somewearlabs.gateway.SomewearGatewayService"
     public const val PERMISSION: String =
         "com.somewearlabs.swtak.plugin.permission.SOMEWEAR_GATEWAY"
 
@@ -28,6 +30,8 @@ public object SomewearGatewayContract {
         public const val SEND_MESSAGE_V2: String = "sendMessageV2"
         public const val GET_DELIVERY_STATUS: String = "getDeliveryStatus"
         public const val POLL_INCOMING_MESSAGES: String = "pollIncomingMessages"
+        public const val GET_RECEIVE_HEALTH: String = "getReceiveHealth"
+        internal const val START_RECEIVING: String = "startReceiving"
         public const val JOIN_WORKSPACE: String = "joinWorkspace"
         public const val SYNC_WORKSPACES: String = "syncWorkspaces"
         public const val GET_WORKSPACE_PROVISIONING_STATUS: String =
@@ -73,6 +77,18 @@ public object SomewearGatewayContract {
         public const val SEQUENCE: String = "sequence"
         public const val SENDER_ID: String = "sender_id"
         public const val RECEIVED_AT_MS: String = "received_at_ms"
+        public const val RECEIVE_SUBSCRIPTION_ACTIVE: String = "receive_subscription_active"
+        public const val ROUTER_CALLBACK_COUNT: String = "router_callback_count"
+        public const val INBOUND_MESSAGE_COUNT: String = "inbound_message_count"
+        public const val IGNORED_INBOUND_COUNT: String = "ignored_inbound_count"
+        public const val RECEIVE_ERROR_COUNT: String = "receive_error_count"
+        public const val LAST_ROUTER_CALLBACK_AT_MS: String = "last_router_callback_at_ms"
+        public const val LAST_INBOUND_MESSAGE_AT_MS: String = "last_inbound_message_at_ms"
+        public const val LAST_RECEIVE_ERROR_AT_MS: String = "last_receive_error_at_ms"
+        public const val LAST_PAYLOAD_TYPE: String = "last_payload_type"
+        public const val LAST_RECEIVE_ERROR: String = "last_receive_error"
+        public const val QUEUED_INCOMING_COUNT: String = "queued_incoming_count"
+        public const val LATEST_SEQUENCE: String = "latest_sequence"
 
         public const val INVITE_CODE: String = "invite_code"
         public const val WORKSPACE_TIMEOUT_MS: String = "workspace_timeout_ms"
