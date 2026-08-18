@@ -151,6 +151,13 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/AndroidManifest.xml"
         );
         Path sdkBuild = repoRoot.resolve("somewear-gateway-sdk/sdk/build.gradle.kts");
+        Path sdkClient = repoRoot.resolve(
+                "somewear-gateway-sdk/sdk/src/main/kotlin/com/sc3/somewear/sdk/SomewearClient.kt"
+        );
+        Path sdkClientImpl = repoRoot.resolve(
+                "somewear-gateway-sdk/sdk/src/main/kotlin/com/sc3/somewear/sdk/"
+                        + "ContentProviderSomewearClient.kt"
+        );
         Path dependencyScript = repoRoot.resolve(
                 "somewear-gateway-sdk/dist/sc3-somewear.gradle.kts"
         );
@@ -160,12 +167,16 @@ public final class Main {
         requireFile(receiveService, "gateway bound receive service source");
         requireFile(helperManifest, "gateway helper manifest");
         requireFile(sdkBuild, "SDK build file");
+        requireFile(sdkClient, "SDK client contract");
+        requireFile(sdkClientImpl, "SDK client implementation");
         requireFile(dependencyScript, "SDK local dependency script");
         String providerSource = Files.readString(provider, StandardCharsets.UTF_8);
         String helperSource = Files.readString(helper, StandardCharsets.UTF_8);
         String scannerSource = Files.readString(scanner, StandardCharsets.UTF_8);
         String receiveServiceSource = Files.readString(receiveService, StandardCharsets.UTF_8);
         String scannerManifest = Files.readString(helperManifest, StandardCharsets.UTF_8);
+        String sdkClientSource = Files.readString(sdkClient, StandardCharsets.UTF_8);
+        String sdkClientImplSource = Files.readString(sdkClientImpl, StandardCharsets.UTF_8);
         String sdkDependencies = Files.readString(sdkBuild, StandardCharsets.UTF_8)
                 + Files.readString(dependencyScript, StandardCharsets.UTF_8);
         if (providerSource.contains(":read_raw_payload")
@@ -234,6 +245,54 @@ public final class Main {
                     "Gateway must host the signature-protected bound receive service"
             );
         }
+        List<String> hardwareGatewayMethods = List.of(
+                "getHardwareSettings",
+                "setTrackingEnabled",
+                "setTrackingInterval",
+                "setBackhaulEnabled",
+                "setSatelliteEnabled",
+                "setMeshRadioEnabled",
+                "setRadioChannel",
+                "setMeshTransmissionStrength",
+                "setLedLightEnabled",
+                "setVibrationFeedbackEnabled",
+                "setEnduranceModeEnabled",
+                "setDeviceButtonFunction",
+                "setConnectionMode",
+                "factoryReset"
+        );
+        for (String method : hardwareGatewayMethods) {
+            if (!helperSource.contains("\"" + method + "\"")) {
+                throw new IllegalStateException("GatewayV2 is missing hardware method " + method);
+            }
+            String sdkMethod;
+            if ("setConnectionMode".equals(method)) {
+                sdkMethod = "setNodeConnectionMode";
+            } else if ("getHardwareSettings".equals(method)) {
+                sdkMethod = "hardwareSettings";
+            } else {
+                sdkMethod = method;
+            }
+            if (!sdkClientSource.contains(" " + sdkMethod + "(")) {
+                throw new IllegalStateException("SDK contract is missing hardware method " + sdkMethod);
+            }
+        }
+        if (!helperSource.contains("DeviceManagementRepositoryImpl")
+                || !helperSource.contains("factoryReset-gIAlu-s")
+                || !helperSource.contains("updateSettings")
+                || !helperSource.contains("updateConnectionMode")) {
+            throw new IllegalStateException(
+                    "Gateway hardware APIs must use the retained Somewear settings/reset workflows"
+            );
+        }
+        if (!sdkClientSource.contains("observeDeviceConnection()")
+                || !sdkClientImplSource.contains(
+                        ".distinctUntilChanged(::sameDeviceObservation)"
+                )) {
+            throw new IllegalStateException(
+                    "SDK connection observer must emit state changes instead of every poll"
+            );
+        }
         if (sdkDependencies.contains("com.google.mlkit")
                 || sdkDependencies.contains("androidx.camera")) {
             throw new IllegalStateException(
@@ -244,6 +303,7 @@ public final class Main {
 
     private static void verifySdkAar(Path aar) throws Exception {
         Set<String> classes = new HashSet<>();
+        String somewearClientSymbols = null;
         String manifest;
         try (ZipFile archive = new ZipFile(aar.toFile())) {
             ZipEntry classesJar = archive.getEntry("classes.jar");
@@ -260,6 +320,9 @@ public final class Main {
                 while ((entry = jar.getNextJarEntry()) != null) {
                     classes.add(entry.getName());
                     String classBytes = new String(jar.readAllBytes(), StandardCharsets.ISO_8859_1);
+                    if ("com/sc3/somewear/sdk/SomewearClient.class".equals(entry.getName())) {
+                        somewearClientSymbols = classBytes;
+                    }
                     if (classBytes.contains("com/google/mlkit")
                             || classBytes.contains("androidx/camera")) {
                         throw new IllegalStateException(
@@ -272,6 +335,12 @@ public final class Main {
         List<String> requiredClasses = List.of(
                 "com/sc3/somewear/sdk/SomewearClient.class",
                 "com/sc3/somewear/sdk/ReceiveHealth.class",
+                "com/sc3/somewear/sdk/HardwareSettings.class",
+                "com/sc3/somewear/sdk/TrackingInterval.class",
+                "com/sc3/somewear/sdk/RadioChannel.class",
+                "com/sc3/somewear/sdk/MeshTransmissionStrength.class",
+                "com/sc3/somewear/sdk/DeviceButtonFunction.class",
+                "com/sc3/somewear/sdk/FactoryResetConfirmation.class",
                 "com/sc3/somewear/sdk/WorkspaceInviteCode.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScanContract.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScannerActivity.class"
@@ -279,6 +348,31 @@ public final class Main {
         for (String requiredClass : requiredClasses) {
             if (!classes.contains(requiredClass)) {
                 throw new IllegalStateException("SDK AAR is missing " + requiredClass);
+            }
+        }
+        if (somewearClientSymbols == null) {
+            throw new IllegalStateException("SDK AAR is missing SomewearClient symbols");
+        }
+        List<String> requiredMethods = List.of(
+                "observeDeviceConnection",
+                "hardwareSettings",
+                "setTrackingEnabled",
+                "setTrackingInterval",
+                "setBackhaulEnabled",
+                "setSatelliteEnabled",
+                "setMeshRadioEnabled",
+                "setRadioChannel",
+                "setMeshTransmissionStrength",
+                "setLedLightEnabled",
+                "setVibrationFeedbackEnabled",
+                "setEnduranceModeEnabled",
+                "setDeviceButtonFunction",
+                "setNodeConnectionMode",
+                "factoryReset"
+        );
+        for (String method : requiredMethods) {
+            if (!somewearClientSymbols.contains(method)) {
+                throw new IllegalStateException("SDK AAR is missing method " + method);
             }
         }
         if (manifest.contains("android.permission.CAMERA")

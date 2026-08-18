@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v9 implements standalone initialization, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v10 implements standalone initialization, a state-change-only connection observer, Node hardware settings, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -208,7 +208,7 @@ Observe continuously:
 
 ```kotlin
 lifecycleScope.launch {
-    somewear.observeDeviceStatus().collect { result ->
+    somewear.observeDeviceConnection().collect { result ->
         when (result) {
             is SomewearResult.Success -> render(result.value)
             is SomewearResult.Failure -> renderError(result.error)
@@ -216,6 +216,13 @@ lifecycleScope.launch {
     }
 }
 ```
+
+The observer emits once immediately and then only when the complete status or
+error changes. It still polls the gateway internally, but an unchanged status is
+not delivered to the collector. Observing never calls `connectBluetooth()`,
+`connectUsb()`, `cancelConnection()`, or `disconnect()`. Do not call those
+methods unconditionally from inside the collector. `observeDeviceStatus()` is a
+source-compatible alias with the same state-change-only behavior.
 
 `DeviceStatus` reports:
 
@@ -230,6 +237,60 @@ Cancel an active attempt or disconnect:
 somewear.cancelConnection()
 somewear.disconnect()
 ```
+
+### Hardware settings
+
+Read the most recently reported Node settings:
+
+```kotlin
+when (val result = somewear.hardwareSettings()) {
+    is SomewearResult.Success -> render(result.value)
+    is SomewearResult.Failure -> showError(result.error)
+}
+```
+
+Individual fields in `HardwareSettings` are nullable. `null` means the retained
+Somewear core has not received that value from the Node; it does not mean
+`false`. Mutations require a connected Node and complete only after Somewear's
+settings command is acknowledged or fails/times out.
+
+```kotlin
+somewear.setTrackingEnabled(true)
+somewear.setTrackingInterval(TrackingInterval(gpsSeconds = 30, sendingSeconds = 60))
+
+somewear.setBackhaulEnabled(true)
+somewear.setSatelliteEnabled(false)
+somewear.setMeshRadioEnabled(true)
+somewear.setRadioChannel(
+    RadioChannel(lowSpeedFrequencyHz = 915_000_000, highSpeedFrequencyHz = 916_000_000),
+)
+somewear.setMeshTransmissionStrength(MeshTransmissionStrength.HIGH)
+
+somewear.setLedLightEnabled(true)
+somewear.setVibrationFeedbackEnabled(true)
+somewear.setEnduranceModeEnabled(false)
+somewear.setDeviceButtonFunction(DeviceButtonFunction.PUSH_TO_TALK)
+somewear.setNodeConnectionMode(NodeConnectionMode.USB)
+```
+
+Supported button functions are `NONE`, `SATELLITE`, `TRACKING`, `SENSOR`, and
+`PUSH_TO_TALK`. Transmission strengths are `LOW`, `MEDIUM`, and `HIGH`.
+`UNKNOWN` is read-only and is rejected by the setters.
+
+Only set radio-channel frequencies supplied for that Node/workspace by Somewear
+and permitted in the operating region. The SDK validates positive Hz values but
+cannot validate spectrum authorization or firmware compatibility.
+
+Changing connection mode normally restarts the Node and disconnects the current
+transport. Factory reset is deliberately harder to call:
+
+```kotlin
+somewear.factoryReset(FactoryResetConfirmation.ERASE_NODE)
+```
+
+This invokes Somewear's retained device-management reset workflow, clears the
+stored bond/device, and normally terminates the connection. Never expose it as a
+single-tap action; require an operator confirmation in SC3.
 
 ### Message format
 
@@ -534,6 +595,19 @@ Every method returns a `Bundle` with:
 | `getDeviceStatus` | none | `connection_state`, `operation_state`, `operation_result`, `local_transport` |
 | `cancelConnection` | none | common result |
 | `setConnectionMode` | `connection_mode: BLUETOOTH or USB` | accepted setting command |
+| `getHardwareSettings` | none | nullable tracking, network, radio, feedback, button, and connection-mode fields |
+| `setTrackingEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setTrackingInterval` | `tracking_gps_seconds`, `tracking_sending_seconds` | acknowledged setting command |
+| `setBackhaulEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setSatelliteEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setMeshRadioEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setRadioChannel` | `low_speed_frequency_hz`, `high_speed_frequency_hz` | acknowledged setting command |
+| `setMeshTransmissionStrength` | `mesh_transmission_strength: LOW, MEDIUM, or HIGH` | acknowledged setting command |
+| `setLedLightEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setVibrationFeedbackEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setEnduranceModeEnabled` | `enabled: Boolean` | acknowledged setting command |
+| `setDeviceButtonFunction` | `device_button_function` | acknowledged setting command |
+| `factoryReset` | `factory_reset_confirmation: ERASE_NODE` | destructive reset result |
 | `disconnect` | none | common result |
 | `shutdown` | none | common result |
 | `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `accepted_at_ms` |
@@ -563,12 +637,15 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v9 | Validation/work remaining |
+| Capability | Gateway v10 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
 | USB connection initiation | Yes | Hardware validation |
-| Change Node to USB/LineIn mode | Yes | Hardware validation; Bluetooth restore not exported |
+| Change Node connection mode between Bluetooth and USB/LineIn | Yes | Physical restart/reconnect validation |
+| State-change-only connection observer | Yes | Unit tested and Android regression validated with one unchanged emission over 2.5 seconds |
+| Read/update Node hardware settings | Yes | Retained settings types and disconnected safety validated on Android; live Node acknowledgement still requires hardware acceptance |
+| Factory reset with explicit confirmation | Yes | Retained device-management bridge verified on Android; destructive live-Node test intentionally not run |
 | Explicit radio/satellite `SendOptions` | Yes | Hardware validation |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
 | Delivery status and actual channel | Yes | Hardware validation |

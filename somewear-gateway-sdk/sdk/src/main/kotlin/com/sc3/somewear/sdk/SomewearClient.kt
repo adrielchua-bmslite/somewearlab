@@ -15,9 +15,36 @@ public interface SomewearClient : AutoCloseable {
     public suspend fun cancelConnection(): SomewearResult<Unit>
     public suspend fun setNodeConnectionMode(mode: NodeConnectionMode): SomewearResult<Unit>
     public suspend fun deviceStatus(): SomewearResult<DeviceStatus>
+
+    /** Emits immediately, then only when the status value actually changes. */
+    public fun observeDeviceConnection(): Flow<SomewearResult<DeviceStatus>>
+
+    /** Compatibility alias for [observeDeviceConnection]. */
     public fun observeDeviceStatus(): Flow<SomewearResult<DeviceStatus>>
     public suspend fun disconnect(): SomewearResult<Unit>
     public suspend fun shutdown(): SomewearResult<Unit>
+
+    public suspend fun hardwareSettings(): SomewearResult<HardwareSettings>
+    public suspend fun setTrackingEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setTrackingInterval(interval: TrackingInterval): SomewearResult<Unit>
+    public suspend fun setBackhaulEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setSatelliteEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setMeshRadioEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setRadioChannel(channel: RadioChannel): SomewearResult<Unit>
+    public suspend fun setMeshTransmissionStrength(
+        strength: MeshTransmissionStrength,
+    ): SomewearResult<Unit>
+    public suspend fun setLedLightEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setVibrationFeedbackEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setEnduranceModeEnabled(enabled: Boolean): SomewearResult<Unit>
+    public suspend fun setDeviceButtonFunction(
+        function: DeviceButtonFunction,
+    ): SomewearResult<Unit>
+
+    /** Erases the Node and normally terminates the local connection. */
+    public suspend fun factoryReset(
+        confirmation: FactoryResetConfirmation,
+    ): SomewearResult<Unit>
 
     public suspend fun send(request: SendRequest): SomewearResult<SendReceipt>
     public suspend fun deliveryStatus(messageId: String): SomewearResult<DeliveryUpdate>

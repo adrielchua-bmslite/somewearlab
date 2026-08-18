@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
@@ -106,18 +107,131 @@ internal class ContentProviderSomewearClient(
     override suspend fun deviceStatus(): SomewearResult<DeviceStatus> =
         call(SomewearGatewayContract.Method.GET_DEVICE_STATUS).map(::parseDeviceStatus)
 
-    override fun observeDeviceStatus(): Flow<SomewearResult<DeviceStatus>> = flow {
-        while (currentCoroutineContext().isActive) {
-            emit(deviceStatus())
-            delay(config.pollIntervalMillis)
-        }
-    }
+    override fun observeDeviceConnection(): Flow<SomewearResult<DeviceStatus>> =
+        flow {
+            while (currentCoroutineContext().isActive) {
+                emit(deviceStatus())
+                delay(config.pollIntervalMillis)
+            }
+        }.distinctUntilChanged(::sameDeviceObservation)
+
+    override fun observeDeviceStatus(): Flow<SomewearResult<DeviceStatus>> =
+        observeDeviceConnection()
 
     override suspend fun disconnect(): SomewearResult<Unit> =
         call(SomewearGatewayContract.Method.DISCONNECT).unit()
 
     override suspend fun shutdown(): SomewearResult<Unit> =
         call(SomewearGatewayContract.Method.SHUTDOWN).unit()
+
+    override suspend fun hardwareSettings(): SomewearResult<HardwareSettings> =
+        call(SomewearGatewayContract.Method.GET_HARDWARE_SETTINGS).map(::parseHardwareSettings)
+
+    override suspend fun setTrackingEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(SomewearGatewayContract.Method.SET_TRACKING_ENABLED, enabled)
+
+    override suspend fun setTrackingInterval(interval: TrackingInterval): SomewearResult<Unit> =
+        call(
+            SomewearGatewayContract.Method.SET_TRACKING_INTERVAL,
+            Bundle().apply {
+                putInt(SomewearGatewayContract.Key.TRACKING_GPS_SECONDS, interval.gpsSeconds)
+                putInt(
+                    SomewearGatewayContract.Key.TRACKING_SENDING_SECONDS,
+                    interval.sendingSeconds,
+                )
+            },
+        ).unit()
+
+    override suspend fun setBackhaulEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(SomewearGatewayContract.Method.SET_BACKHAUL_ENABLED, enabled)
+
+    override suspend fun setSatelliteEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(SomewearGatewayContract.Method.SET_SATELLITE_ENABLED, enabled)
+
+    override suspend fun setMeshRadioEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(SomewearGatewayContract.Method.SET_MESH_RADIO_ENABLED, enabled)
+
+    override suspend fun setRadioChannel(channel: RadioChannel): SomewearResult<Unit> =
+        call(
+            SomewearGatewayContract.Method.SET_RADIO_CHANNEL,
+            Bundle().apply {
+                putInt(
+                    SomewearGatewayContract.Key.LOW_SPEED_FREQUENCY_HZ,
+                    channel.lowSpeedFrequencyHz,
+                )
+                putInt(
+                    SomewearGatewayContract.Key.HIGH_SPEED_FREQUENCY_HZ,
+                    channel.highSpeedFrequencyHz,
+                )
+            },
+        ).unit()
+
+    override suspend fun setMeshTransmissionStrength(
+        strength: MeshTransmissionStrength,
+    ): SomewearResult<Unit> {
+        if (strength == MeshTransmissionStrength.UNKNOWN) {
+            return invalid(
+                SomewearGatewayContract.Method.SET_MESH_TRANSMISSION_STRENGTH,
+                "strength must be LOW, MEDIUM, or HIGH",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.SET_MESH_TRANSMISSION_STRENGTH,
+            Bundle().apply {
+                putString(
+                    SomewearGatewayContract.Key.MESH_TRANSMISSION_STRENGTH,
+                    strength.wireValue,
+                )
+            },
+        ).unit()
+    }
+
+    override suspend fun setLedLightEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(SomewearGatewayContract.Method.SET_LED_LIGHT_ENABLED, enabled)
+
+    override suspend fun setVibrationFeedbackEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(
+            SomewearGatewayContract.Method.SET_VIBRATION_FEEDBACK_ENABLED,
+            enabled,
+        )
+
+    override suspend fun setEnduranceModeEnabled(enabled: Boolean): SomewearResult<Unit> =
+        setBooleanHardwareSetting(
+            SomewearGatewayContract.Method.SET_ENDURANCE_MODE_ENABLED,
+            enabled,
+        )
+
+    override suspend fun setDeviceButtonFunction(
+        function: DeviceButtonFunction,
+    ): SomewearResult<Unit> {
+        if (function == DeviceButtonFunction.UNKNOWN) {
+            return invalid(
+                SomewearGatewayContract.Method.SET_DEVICE_BUTTON_FUNCTION,
+                "function must be a configurable device-button function",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.SET_DEVICE_BUTTON_FUNCTION,
+            Bundle().apply {
+                putString(
+                    SomewearGatewayContract.Key.DEVICE_BUTTON_FUNCTION,
+                    function.wireValue,
+                )
+            },
+        ).unit()
+    }
+
+    override suspend fun factoryReset(
+        confirmation: FactoryResetConfirmation,
+    ): SomewearResult<Unit> = call(
+        SomewearGatewayContract.Method.FACTORY_RESET,
+        Bundle().apply {
+            putString(
+                SomewearGatewayContract.Key.FACTORY_RESET_CONFIRMATION,
+                confirmation.wireValue,
+            )
+        },
+    ).unit()
 
     override suspend fun send(request: SendRequest): SomewearResult<SendReceipt> {
         // Deliberately no fallback to legacy sendMessage: it enables all default channels.
@@ -455,6 +569,94 @@ internal class ContentProviderSomewearClient(
         )
     }
 
+    private suspend fun setBooleanHardwareSetting(
+        method: String,
+        enabled: Boolean,
+    ): SomewearResult<Unit> = call(
+        method,
+        Bundle().apply { putBoolean(SomewearGatewayContract.Key.ENABLED, enabled) },
+    ).unit()
+
+    private fun parseHardwareSettings(bundle: Bundle): HardwareSettings {
+        val gpsSeconds = bundle.optionalInt(SomewearGatewayContract.Key.TRACKING_GPS_SECONDS)
+        val sendingSeconds = bundle.optionalInt(
+            SomewearGatewayContract.Key.TRACKING_SENDING_SECONDS,
+        )
+        val trackingInterval = if (
+            gpsSeconds != null && gpsSeconds > 0 && sendingSeconds != null && sendingSeconds > 0
+        ) {
+            TrackingInterval(gpsSeconds, sendingSeconds)
+        } else {
+            null
+        }
+
+        val lowFrequency = bundle.optionalInt(
+            SomewearGatewayContract.Key.LOW_SPEED_FREQUENCY_HZ,
+        )
+        val highFrequency = bundle.optionalInt(
+            SomewearGatewayContract.Key.HIGH_SPEED_FREQUENCY_HZ,
+        )
+        val radioChannel = if (
+            lowFrequency != null && lowFrequency > 0 && highFrequency != null && highFrequency > 0
+        ) {
+            RadioChannel(lowFrequency, highFrequency)
+        } else {
+            null
+        }
+
+        val connectionMode = when (
+            bundle.getString(SomewearGatewayContract.Key.CONNECTION_MODE)
+                ?.uppercase(Locale.ROOT)
+        ) {
+            "BLUETOOTH" -> NodeConnectionMode.BLUETOOTH
+            "LINEIN", "USB" -> NodeConnectionMode.USB
+            else -> null
+        }
+
+        return HardwareSettings(
+            trackingEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.TRACKING_ENABLED,
+            ),
+            trackingInterval = trackingInterval,
+            backhaulEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.BACKHAUL_ENABLED,
+            ),
+            satelliteEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.SATELLITE_ENABLED,
+            ),
+            meshRadioEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.MESH_RADIO_ENABLED,
+            ),
+            radioChannel = radioChannel,
+            meshTransmissionStrength = bundle
+                .getString(SomewearGatewayContract.Key.MESH_TRANSMISSION_STRENGTH)
+                ?.let {
+                    enumValueOrUnknown<MeshTransmissionStrength>(
+                        it,
+                        MeshTransmissionStrength.UNKNOWN,
+                    )
+                },
+            ledLightEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.LED_LIGHT_ENABLED,
+            ),
+            vibrationFeedbackEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.VIBRATION_FEEDBACK_ENABLED,
+            ),
+            enduranceModeEnabled = bundle.optionalBoolean(
+                SomewearGatewayContract.Key.ENDURANCE_MODE_ENABLED,
+            ),
+            deviceButtonFunction = bundle
+                .getString(SomewearGatewayContract.Key.DEVICE_BUTTON_FUNCTION)
+                ?.let {
+                    enumValueOrUnknown<DeviceButtonFunction>(
+                        it,
+                        DeviceButtonFunction.UNKNOWN,
+                    )
+                },
+            connectionMode = connectionMode,
+        )
+    }
+
     private suspend fun call(method: String, extras: Bundle? = null): SomewearResult<Bundle> =
         withContext(Dispatchers.IO) {
             try {
@@ -627,7 +829,23 @@ private inline fun <reified T : Enum<T>> enumValueOrUnknown(value: String?, unkn
 
 private fun Bundle.optionalInt(key: String): Int? = if (containsKey(key)) getInt(key) else null
 
+private fun Bundle.optionalBoolean(key: String): Boolean? =
+    if (containsKey(key)) getBoolean(key) else null
+
 private fun Bundle.positiveLongOrNull(key: String): Long? = getLong(key).takeIf { it > 0L }
+
+internal fun sameDeviceObservation(
+    previous: SomewearResult<DeviceStatus>,
+    next: SomewearResult<DeviceStatus>,
+): Boolean = when {
+    previous is SomewearResult.Success && next is SomewearResult.Success ->
+        previous.value == next.value
+    previous is SomewearResult.Failure && next is SomewearResult.Failure ->
+        previous.error.code == next.error.code &&
+            previous.error.message == next.error.message &&
+            previous.error.method == next.error.method
+    else -> false
+}
 
 @Suppress("DEPRECATION")
 private fun Bundle.bundleList(key: String): List<Bundle> =

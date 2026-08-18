@@ -84,6 +84,66 @@ public enum class NodeConnectionMode(public val wireValue: String) {
     USB("USB"),
 }
 
+public data class TrackingInterval(
+    val gpsSeconds: Int,
+    val sendingSeconds: Int = gpsSeconds,
+) {
+    init {
+        require(gpsSeconds > 0) { "gpsSeconds must be positive" }
+        require(sendingSeconds > 0) { "sendingSeconds must be positive" }
+    }
+}
+
+public data class RadioChannel(
+    val lowSpeedFrequencyHz: Int,
+    val highSpeedFrequencyHz: Int,
+) {
+    init {
+        require(lowSpeedFrequencyHz > 0) { "lowSpeedFrequencyHz must be positive" }
+        require(highSpeedFrequencyHz > 0) { "highSpeedFrequencyHz must be positive" }
+    }
+}
+
+public enum class MeshTransmissionStrength(public val wireValue: String) {
+    LOW("LOW"),
+    MEDIUM("MEDIUM"),
+    HIGH("HIGH"),
+    UNKNOWN("UNKNOWN"),
+}
+
+public enum class DeviceButtonFunction(public val wireValue: String) {
+    NONE("NONE"),
+    SATELLITE("SATELLITE"),
+    TRACKING("TRACKING"),
+    SENSOR("SENSOR"),
+    PUSH_TO_TALK("PUSH_TO_TALK"),
+    UNKNOWN("UNKNOWN"),
+}
+
+/** Required explicit token for the destructive Node factory-reset operation. */
+public enum class FactoryResetConfirmation(public val wireValue: String) {
+    ERASE_NODE("ERASE_NODE"),
+}
+
+/**
+ * Current settings reported by the connected Node. Null means the retained
+ * Somewear core has not received that value from the Node yet.
+ */
+public data class HardwareSettings(
+    val trackingEnabled: Boolean?,
+    val trackingInterval: TrackingInterval?,
+    val backhaulEnabled: Boolean?,
+    val satelliteEnabled: Boolean?,
+    val meshRadioEnabled: Boolean?,
+    val radioChannel: RadioChannel?,
+    val meshTransmissionStrength: MeshTransmissionStrength?,
+    val ledLightEnabled: Boolean?,
+    val vibrationFeedbackEnabled: Boolean?,
+    val enduranceModeEnabled: Boolean?,
+    val deviceButtonFunction: DeviceButtonFunction?,
+    val connectionMode: NodeConnectionMode?,
+)
+
 public enum class RoutePolicy(public val wireValue: String) {
     /** Never use satellite or cellular. */
     RADIO_ONLY("RADIO_ONLY"),

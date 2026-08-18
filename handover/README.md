@@ -165,6 +165,19 @@ binds the gateway receive service during this call; keep the `SomewearClient`
 open for the entire communications session. Then enroll/synchronize a workspace,
 start `incomingMessages()`, connect Bluetooth/USB, and send messages.
 
+Use `observeDeviceConnection()` for the UI connection stream. It emits the
+initial state and then only real state/error changes. `observeDeviceStatus()` is
+a compatibility alias. Neither method connects or disconnects the Node, so SC3
+must not restart connection logic for every observed value.
+
+After the Node is connected, `hardwareSettings()` returns its current nullable
+settings and the typed setters cover tracking, interval, backhaul, satellite,
+mesh radio, radio channel, mesh strength, LED, vibration, endurance, device
+button, and Bluetooth/USB connection mode. See
+`somewear-gateway-sdk/README.md#hardware-settings` for the exact calls. Treat
+`factoryReset(FactoryResetConfirmation.ERASE_NODE)` as destructive: it clears
+the Node and stored local bond/device and normally disconnects immediately.
+
 On a fresh install, `listWorkspaces()` can correctly return an empty cache. Register the SDK scanner and submit the result to the new enrollment API:
 
 ```kotlin
@@ -206,10 +219,13 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | `NoKnownDeviceFound` for a valid Bluetooth MAC | The installed SDK/gateway predates explicit-MAC cache seeding, or the gateway lacks Nearby devices permission. | Pull the latest repository, re-sign/reinstall all five prepared gateway splits, update the AAR, grant Nearby devices permission, and retry. A Node requiring pairing may then report `PreBondingRequired`. |
 | `Missing extras Bundle` from `connectUsb()` | SC3 is using an older AAR that sends a null provider extras Bundle, or the installed base gateway does not match the handover set. | Update the AAR and re-sign/reinstall all five APKs from `build/signed-splits-v2/`. The current SDK always sends an empty Bundle for USB. |
 | `No virtual method getByteArray` mentioning `BaseBundle` | The caller reached an unsupported legacy raw-payload method, normally because the installed base gateway and AAR are from different handover versions. | Pull the latest repository, run the verifier, re-sign all five prepared splits, and reinstall them together. API v2 now blocks legacy raw and unknown methods before vendor-provider dispatch. |
+| Connection observer repeatedly fires and connection logic disconnects/restarts | SC3 is using an older AAR, or the collector calls connect/disconnect for each value. | Update the AAR and all five gateway splits. Collect `observeDeviceConnection()` only for state changes and start a connection only from an explicit user/state-machine transition. |
+| Hardware setter returns `NOT_CONNECTED` | Settings are written through the connected Node and no Bluetooth/USB Node is currently connected. | Wait for an observed connected state, then submit one setting operation and handle its acknowledgement/timeout. |
+| Hardware call returns `UNSUPPORTED` or is missing at runtime | The AAR and installed base APK are from different handover revisions. | Pull one repository revision, run the verifier, then re-sign/reinstall all five splits and rebuild SC3 with that revision's AAR. |
 | Connected but no incoming messages and no error | An older gateway had no receive-lifetime service and swallowed router callback exceptions, or SC3 is not collecting `incomingMessages()`. | Update both AAR and all five gateway splits. Start the Flow before peer transmission and inspect `receiveHealth()`: zero callbacks points to Node/workspace/radio delivery; ignored callbacks indicate a non-`MessagePayload`; queued messages point to an SC3 cursor/UI issue. |
 
 ## Operational limitations
 
-- Physical radio/satellite delivery still requires provisioned Somewear hardware and compatible workspace/traffic keys.
+- Physical radio/satellite delivery and successful live hardware-setting/reset acknowledgements still require provisioned Somewear hardware and compatible workspace/traffic keys.
 - `RADIO_THEN_SATELLITE` remains unsupported. QR enrollment, workspace synchronization, and cache selection are exposed, but a real issued invite, key transfer, and peer delivery still require account/hardware acceptance testing.
 - The gateway artifacts contain vendor-derived code. Keep the repository and downstream artifacts access-controlled and obtain the required Somewear licensing/approval before deployment or redistribution.

@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -39,6 +40,21 @@ public final class GatewayV2 {
     private static final int MAX_INCOMING_MESSAGES = 2_000;
     private static final long DEFAULT_WORKSPACE_TIMEOUT_MS = 45_000L;
     private static final long MAX_WORKSPACE_TIMEOUT_MS = 120_000L;
+    private static final long DEFAULT_SETTINGS_TIMEOUT_MS = 30_000L;
+    private static final int SETTING_TRACKING_ENABLED = 0;
+    private static final int SETTING_TRACKING_FREQUENCY = 1;
+    private static final int SETTING_NO_SLEEP = 4;
+    private static final int SETTING_CONNECTION_MODE = 8;
+    private static final int SETTING_LED_DISABLED = 12;
+    private static final int SETTING_SATELLITE_DISABLED = 13;
+    private static final int SETTING_BUTTON_FUNCTION = 15;
+    private static final int SETTING_LOW_SPEED_FREQUENCY = 16;
+    private static final int SETTING_HIGH_SPEED_FREQUENCY = 17;
+    private static final int SETTING_RADIO_POWER_MODE = 18;
+    private static final int SETTING_BACKHAUL_ENABLED = 20;
+    private static final int SETTING_HAPTICS_DISABLED = 21;
+    private static final int SETTING_RADIO_MODE = 25;
+    private static final int HARDWARE_SETTING_COUNT = 32;
     private static final List<Bundle> INCOMING = new ArrayList<>();
     private static final Map<String, Bundle> DELIVERY = new LinkedHashMap<>();
     private static final Map<String, String> TRACE_TO_MESSAGE = new LinkedHashMap<>();
@@ -75,10 +91,42 @@ public final class GatewayV2 {
             if ("startReceiving".equals(method)) return startReceivingResult();
             if ("testInjectIncomingMessage".equals(method)) return injectIncoming(extras);
             if ("testDispatchRouterMessage".equals(method)) return dispatchTestRouterMessage(extras);
+            if ("testInspectHardwareSettingsPatch".equals(method)) {
+                return inspectTestHardwareSettingsPatch();
+            }
             if ("connectUsb".equals(method)
                     || "connectUSB".equals(method)
                     || "connect_usb".equals(method)) return connectUsb();
             if ("setConnectionMode".equals(method)) return setConnectionMode(extras);
+            if ("getHardwareSettings".equals(method)) return hardwareSettings();
+            if ("setTrackingEnabled".equals(method)) {
+                return updateBooleanSetting(extras, SETTING_TRACKING_ENABLED, false);
+            }
+            if ("setTrackingInterval".equals(method)) return setTrackingInterval(extras);
+            if ("setBackhaulEnabled".equals(method)) {
+                return updateBooleanSetting(extras, SETTING_BACKHAUL_ENABLED, false);
+            }
+            if ("setSatelliteEnabled".equals(method)) {
+                return updateBooleanSetting(extras, SETTING_SATELLITE_DISABLED, true);
+            }
+            if ("setMeshRadioEnabled".equals(method)) return setMeshRadioEnabled(extras);
+            if ("setRadioChannel".equals(method)) return setRadioChannel(extras);
+            if ("setMeshTransmissionStrength".equals(method)) {
+                return setMeshTransmissionStrength(extras);
+            }
+            if ("setLedLightEnabled".equals(method)) {
+                return updateBooleanSetting(extras, SETTING_LED_DISABLED, true);
+            }
+            if ("setVibrationFeedbackEnabled".equals(method)) {
+                return updateBooleanSetting(extras, SETTING_HAPTICS_DISABLED, true);
+            }
+            if ("setEnduranceModeEnabled".equals(method)) {
+                return updateBooleanSetting(extras, SETTING_NO_SLEEP, true);
+            }
+            if ("setDeviceButtonFunction".equals(method)) {
+                return setDeviceButtonFunction(extras);
+            }
+            if ("factoryReset".equals(method)) return factoryReset(extras);
             if ("shutdown".equals(method)) return shutdown();
             if ("listWorkspaces".equals(method)) return listWorkspaces();
             if ("syncWorkspaces".equals(method)) return syncWorkspaces(extras);
@@ -142,6 +190,11 @@ public final class GatewayV2 {
                 "delivery_status",
                 "incoming_messages",
                 "receive_health",
+                "hardware_settings",
+                "tracking_settings",
+                "network_settings",
+                "device_settings",
+                "factory_reset",
                 "workspace_join",
                 "workspace_sync",
                 "workspace_qr_invite",
@@ -827,17 +880,370 @@ public final class GatewayV2 {
     private static Bundle setConnectionMode(Bundle extras) throws Exception {
         if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
         String mode = extras.getString("connection_mode");
-        if (!"USB".equalsIgnoreCase(mode) && !"LineIn".equalsIgnoreCase(mode)) {
-            return error("UNSUPPORTED", "Only USB/LineIn mode is implemented in this gateway build");
+        ensureCoreStarted();
+        final String vendorMode;
+        if ("USB".equalsIgnoreCase(mode) || "LineIn".equalsIgnoreCase(mode)) {
+            vendorMode = "LineIn";
+        } else if ("BLUETOOTH".equalsIgnoreCase(mode)) {
+            vendorMode = "Bluetooth";
+        } else {
+            return error("INVALID_REQUEST", "connection_mode must be BLUETOOTH or USB");
+        }
+        if (!deviceConnected()) return notConnectedForSettings();
+        Object result = invokeSuspend(
+                deviceUtil(),
+                "updateConnectionMode",
+                DEFAULT_SETTINGS_TIMEOUT_MS,
+                enumField("com.somewear.wire.SettingsCommand$ConnectionMode", vendorMode)
+        );
+        if (!Boolean.TRUE.equals(result)) {
+            return error("GATEWAY_REJECTED", "The Node did not acknowledge connection mode");
+        }
+        return ok("Node connection mode accepted");
+    }
+
+    private static Bundle hardwareSettings() throws Exception {
+        ensureCoreStarted();
+        Object settingsFlow = invokeNoArgs(deviceUtil(), "getSettings");
+        Object settings = invokeNoArgs(settingsFlow, "getValue");
+        return hardwareSettingsBundle(settings, "Current Somewear Node hardware settings");
+    }
+
+    private static Bundle hardwareSettingsBundle(Object settings, String message) throws Exception {
+        Bundle result = ok(message);
+        if (settings == null) return result;
+
+        putOptionalBoolean(result, "tracking_enabled", invokeNoArgs(settings, "getTrackingEnabled"), false);
+        Object trackingFrequency = invokeNoArgs(settings, "getTrackingFrequency");
+        if (trackingFrequency != null) {
+            putPositiveInt(
+                    result,
+                    "tracking_gps_seconds",
+                    invokeNoArgs(trackingFrequency, "getGpsSeconds")
+            );
+            putPositiveInt(
+                    result,
+                    "tracking_sending_seconds",
+                    invokeNoArgs(trackingFrequency, "getSendingSeconds")
+            );
+        }
+        putOptionalBoolean(result, "backhaul_enabled", invokeNoArgs(settings, "getBackhaulEnabled"), false);
+        putOptionalBoolean(result, "satellite_enabled", invokeNoArgs(settings, "getSatelliteDisabled"), true);
+
+        Object radioMode = invokeNoArgs(settings, "getRadioMode");
+        if (radioMode != null) {
+            String value = String.valueOf(radioMode);
+            result.putBoolean(
+                    "mesh_radio_enabled",
+                    "RadioModeEnabled".equals(value) || "RadioModeNone".equals(value)
+            );
+        }
+        putPositiveInt(
+                result,
+                "low_speed_frequency_hz",
+                invokeNoArgs(settings, "getLowSpeedFrequencyHz")
+        );
+        putPositiveInt(
+                result,
+                "high_speed_frequency_hz",
+                invokeNoArgs(settings, "getHighSpeedFrequencyHz")
+        );
+
+        Object powerMode = invokeNoArgs(settings, "getRadioPowerMode");
+        if (powerMode != null) {
+            result.putString(
+                    "mesh_transmission_strength",
+                    externalPowerMode(String.valueOf(powerMode))
+            );
+        }
+        putOptionalBoolean(result, "led_light_enabled", invokeNoArgs(settings, "getLedDisabled"), true);
+        putOptionalBoolean(
+                result,
+                "vibration_feedback_enabled",
+                invokeNoArgs(settings, "getHapticsDisabled"),
+                true
+        );
+        putOptionalBoolean(result, "endurance_mode_enabled", invokeNoArgs(settings, "getNoSleep"), true);
+
+        Object button = invokeNoArgs(settings, "getButton1");
+        if (button != null) {
+            result.putString("device_button_function", externalButtonFunction(String.valueOf(button)));
+        }
+        Object connectionMode = invokeNoArgs(settings, "getConnectionMode");
+        if (connectionMode != null) {
+            result.putString(
+                    "connection_mode",
+                    "LineIn".equals(String.valueOf(connectionMode)) ? "USB" : "BLUETOOTH"
+            );
+        }
+        return result;
+    }
+
+    /** Signature-protected test hook; constructs no command and changes no Node state. */
+    private static Bundle inspectTestHardwareSettingsPatch() throws Exception {
+        Object[] fields = emptyHardwareSettingFields();
+        fields[SETTING_TRACKING_ENABLED] = true;
+        fields[SETTING_TRACKING_FREQUENCY] = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.TrackingFrequency"
+        ).getConstructor(int.class, int.class).newInstance(15, 30);
+        fields[SETTING_NO_SLEEP] = false;
+        fields[SETTING_CONNECTION_MODE] = enumField(
+                "com.somewear.wire.SettingsCommand$ConnectionMode",
+                "Bluetooth"
+        );
+        fields[SETTING_LED_DISABLED] = false;
+        fields[SETTING_SATELLITE_DISABLED] = false;
+        fields[SETTING_BUTTON_FUNCTION] = enumField(
+                "com.somewear.wire.ButtonFunction",
+                "ButtonFunctionPTT"
+        );
+        fields[SETTING_LOW_SPEED_FREQUENCY] = 915_000_000;
+        fields[SETTING_HIGH_SPEED_FREQUENCY] = 916_000_000;
+        fields[SETTING_RADIO_POWER_MODE] = enumField(
+                "com.somewear.wire.SettingsCommand$PowerMode",
+                "PowerModeHigh"
+        );
+        fields[SETTING_BACKHAUL_ENABLED] = true;
+        fields[SETTING_HAPTICS_DISABLED] = false;
+        fields[SETTING_RADIO_MODE] = enumField(
+                "com.somewear.wire.RadioMode",
+                "RadioModeEnabled"
+        );
+        Bundle result = hardwareSettingsBundle(
+                newHardwareSettings(fields),
+                "Hardware-settings patch reflection test"
+        );
+        Class<?> deviceUtilClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.util.DeviceUtil"
+        );
+        Object repository = Class.forName(
+                "com.somewearlabs.uicomponent.device.DeviceManagementRepositoryImpl"
+        ).getConstructor(Context.class, deviceUtilClass).newInstance(appContext, deviceUtil());
+        findMethod(repository.getClass(), "factoryReset-gIAlu-s", 2);
+        result.putBoolean("factory_reset_bridge_available", true);
+        return result;
+    }
+
+    private static Bundle updateBooleanSetting(
+            Bundle extras,
+            int settingIndex,
+            boolean invert
+    ) throws Exception {
+        if (extras == null || !extras.containsKey("enabled")) {
+            return error("INVALID_REQUEST", "Missing enabled Boolean");
+        }
+        boolean value = extras.getBoolean("enabled");
+        return updateHardwareSetting(settingIndex, invert ? !value : value);
+    }
+
+    private static Bundle setTrackingInterval(Bundle extras) throws Exception {
+        if (extras == null
+                || !extras.containsKey("tracking_gps_seconds")
+                || !extras.containsKey("tracking_sending_seconds")) {
+            return error("INVALID_REQUEST", "Missing tracking interval values");
+        }
+        int gpsSeconds = extras.getInt("tracking_gps_seconds");
+        int sendingSeconds = extras.getInt("tracking_sending_seconds");
+        if (gpsSeconds <= 0 || sendingSeconds <= 0) {
+            return error("INVALID_REQUEST", "Tracking intervals must be positive seconds");
+        }
+        Object frequency = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.TrackingFrequency"
+        ).getConstructor(int.class, int.class).newInstance(gpsSeconds, sendingSeconds);
+        return updateHardwareSetting(SETTING_TRACKING_FREQUENCY, frequency);
+    }
+
+    private static Bundle setMeshRadioEnabled(Bundle extras) throws Exception {
+        if (extras == null || !extras.containsKey("enabled")) {
+            return error("INVALID_REQUEST", "Missing enabled Boolean");
+        }
+        Object mode = enumField(
+                "com.somewear.wire.RadioMode",
+                extras.getBoolean("enabled") ? "RadioModeEnabled" : "RadioModeDisabled"
+        );
+        return updateHardwareSetting(SETTING_RADIO_MODE, mode);
+    }
+
+    private static Bundle setRadioChannel(Bundle extras) throws Exception {
+        if (extras == null
+                || !extras.containsKey("low_speed_frequency_hz")
+                || !extras.containsKey("high_speed_frequency_hz")) {
+            return error("INVALID_REQUEST", "Missing radio-channel frequencies");
+        }
+        int low = extras.getInt("low_speed_frequency_hz");
+        int high = extras.getInt("high_speed_frequency_hz");
+        if (low <= 0 || high <= 0) {
+            return error("INVALID_REQUEST", "Radio-channel frequencies must be positive Hz");
+        }
+        Object[] fields = emptyHardwareSettingFields();
+        fields[SETTING_LOW_SPEED_FREQUENCY] = low;
+        fields[SETTING_HIGH_SPEED_FREQUENCY] = high;
+        return updateHardwareSettings(fields);
+    }
+
+    private static Bundle setMeshTransmissionStrength(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String requested = requiredString(extras, "mesh_transmission_strength").toUpperCase(Locale.US);
+        final String vendorValue;
+        if ("LOW".equals(requested)) {
+            vendorValue = "PowerModeLow";
+        } else if ("MEDIUM".equals(requested)) {
+            vendorValue = "PowerModeMedium";
+        } else if ("HIGH".equals(requested)) {
+            vendorValue = "PowerModeHigh";
+        } else {
+            return error("INVALID_REQUEST", "mesh_transmission_strength must be LOW, MEDIUM, or HIGH");
+        }
+        return updateHardwareSetting(
+                SETTING_RADIO_POWER_MODE,
+                enumField("com.somewear.wire.SettingsCommand$PowerMode", vendorValue)
+        );
+    }
+
+    private static Bundle setDeviceButtonFunction(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String requested = requiredString(extras, "device_button_function").toUpperCase(Locale.US);
+        final String vendorValue;
+        if ("NONE".equals(requested)) {
+            vendorValue = "ButtonFunctionNone";
+        } else if ("SATELLITE".equals(requested)) {
+            vendorValue = "ButtonFunctionSat";
+        } else if ("TRACKING".equals(requested)) {
+            vendorValue = "ButtonFunctionTracking";
+        } else if ("SENSOR".equals(requested)) {
+            vendorValue = "ButtonFunctionSensor";
+        } else if ("PUSH_TO_TALK".equals(requested)) {
+            vendorValue = "ButtonFunctionPTT";
+        } else {
+            return error("INVALID_REQUEST", "Unknown device-button function");
+        }
+        return updateHardwareSetting(
+                SETTING_BUTTON_FUNCTION,
+                enumField("com.somewear.wire.ButtonFunction", vendorValue)
+        );
+    }
+
+    private static Bundle factoryReset(Bundle extras) throws Exception {
+        if (extras == null
+                || !"ERASE_NODE".equals(extras.getString("factory_reset_confirmation"))) {
+            return error("INVALID_REQUEST", "Factory reset requires ERASE_NODE confirmation");
         }
         ensureCoreStarted();
-        Class<?> useCaseClass = Class.forName(
-                "com.somewearlabs.ataklibs.usb.UsbConnectionUseCaseImpl"
+        if (!deviceConnected()) return notConnectedForSettings();
+        Object util = deviceUtil();
+        Object address = invokeNoArgs(util, "getConnectedBleDeviceAddress");
+        Class<?> deviceUtilClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.util.DeviceUtil"
         );
-        Object companion = useCaseClass.getField("Companion").get(null);
-        Object useCase = invokeNoArgs(companion, "getInstance");
-        invokeNoArgs(useCase, "requestLineInConnectionMode");
-        return ok("USB/LineIn mode request accepted");
+        Object repository = Class.forName(
+                "com.somewearlabs.uicomponent.device.DeviceManagementRepositoryImpl"
+        ).getConstructor(Context.class, deviceUtilClass).newInstance(appContext, util);
+        try {
+            // This is the retained Somewear reset workflow: clear the most recent
+            // bond, reset firmware, and forget the device from the local cache.
+            invokeSuspend(
+                    repository,
+                    "factoryReset-gIAlu-s",
+                    DEFAULT_SETTINGS_TIMEOUT_MS,
+                    address
+            );
+        } catch (SuspendTimeoutException timeout) {
+            return error("TIMEOUT", "Timed out waiting for the Node factory reset");
+        }
+        return ok("Node factory reset completed; the connection and stored bond were cleared");
+    }
+
+    private static Bundle updateHardwareSetting(int index, Object value) throws Exception {
+        Object[] fields = emptyHardwareSettingFields();
+        fields[index] = value;
+        return updateHardwareSettings(fields);
+    }
+
+    private static Bundle updateHardwareSettings(Object[] fields) throws Exception {
+        ensureCoreStarted();
+        if (!deviceConnected()) return notConnectedForSettings();
+        Object patch = newHardwareSettings(fields);
+        final Object acknowledged;
+        try {
+            acknowledged = invokeSuspend(
+                    deviceUtil(),
+                    "updateSettings",
+                    DEFAULT_SETTINGS_TIMEOUT_MS,
+                    patch
+            );
+        } catch (SuspendTimeoutException timeout) {
+            return error("TIMEOUT", "Timed out waiting for the Node settings acknowledgement");
+        }
+        if (acknowledged == null) {
+            return error("GATEWAY_REJECTED", "The Node did not acknowledge the settings update");
+        }
+        return ok("Node hardware setting acknowledged");
+    }
+
+    private static Object[] emptyHardwareSettingFields() {
+        return new Object[HARDWARE_SETTING_COUNT];
+    }
+
+    private static Object newHardwareSettings(Object[] fields) throws Exception {
+        if (fields.length != HARDWARE_SETTING_COUNT) {
+            throw new IllegalArgumentException("Unexpected hardware setting field count");
+        }
+        Class<?> type = Class.forName(
+                "com.somewearlabs.somewearshared.device.SharedDevice$Settings"
+        );
+        for (Constructor<?> constructor : type.getConstructors()) {
+            if (constructor.getParameterTypes().length == HARDWARE_SETTING_COUNT) {
+                return constructor.newInstance(fields);
+            }
+        }
+        throw new NoSuchMethodException(type.getName() + "/" + HARDWARE_SETTING_COUNT);
+    }
+
+    private static boolean deviceConnected() throws Exception {
+        Object state = invokeNoArgs(invokeNoArgs(deviceUtil(), "getConnectionState"), "getValue");
+        String value = String.valueOf(state);
+        return "Connected".equals(value) || "ConnectedAndScanning".equals(value);
+    }
+
+    private static Bundle notConnectedForSettings() {
+        return error("NOT_CONNECTED", "Connect the Somewear Node before changing hardware settings");
+    }
+
+    private static Object enumField(String className, String fieldName) throws Exception {
+        return Class.forName(className).getField(fieldName).get(null);
+    }
+
+    private static void putOptionalBoolean(
+            Bundle result,
+            String key,
+            Object rawValue,
+            boolean invert
+    ) {
+        if (!(rawValue instanceof Boolean)) return;
+        boolean value = (Boolean) rawValue;
+        result.putBoolean(key, invert ? !value : value);
+    }
+
+    private static void putPositiveInt(Bundle result, String key, Object rawValue) {
+        if (!(rawValue instanceof Number)) return;
+        int value = ((Number) rawValue).intValue();
+        if (value > 0) result.putInt(key, value);
+    }
+
+    private static String externalPowerMode(String value) {
+        if (value.endsWith("High")) return "HIGH";
+        if (value.endsWith("Medium")) return "MEDIUM";
+        if (value.endsWith("Low")) return "LOW";
+        return "UNKNOWN";
+    }
+
+    private static String externalButtonFunction(String value) {
+        if (value.endsWith("Sat")) return "SATELLITE";
+        if (value.endsWith("Tracking")) return "TRACKING";
+        if (value.endsWith("Sensor")) return "SENSOR";
+        if (value.endsWith("PTT")) return "PUSH_TO_TALK";
+        if (value.endsWith("None")) return "NONE";
+        return "UNKNOWN";
     }
 
     private static Bundle shutdown() throws Exception {
@@ -1045,6 +1451,14 @@ public final class GatewayV2 {
         return invokeNoArgs(companion, "getInstance");
     }
 
+    private static Object deviceUtil() throws Exception {
+        Class<?> type = Class.forName(
+                "com.somewearlabs.somewearshared.core.util.DeviceUtil"
+        );
+        Object companion = type.getField("Companion").get(null);
+        return invokeNoArgs(companion, "getInstance");
+    }
+
     private static Object kotlinUnit() {
         try {
             return Class.forName("kotlin.Unit").getField("INSTANCE").get(null);
@@ -1104,7 +1518,7 @@ public final class GatewayV2 {
 
         final Object immediate;
         try {
-            immediate = findMethod(target.getClass(), name, callArguments.length)
+            immediate = findCompatibleMethod(target.getClass(), name, callArguments)
                     .invoke(target, callArguments);
         } catch (InvocationTargetException exception) {
             throwAsException(exception.getCause());
@@ -1169,6 +1583,53 @@ public final class GatewayV2 {
             }
         }
         throw new NoSuchMethodException(type.getName() + "." + name + "/" + parameterCount);
+    }
+
+    private static Method findCompatibleMethod(Class<?> type, String name, Object[] arguments)
+            throws NoSuchMethodException {
+        for (Class<?> cursor = type; cursor != null; cursor = cursor.getSuperclass()) {
+            for (Method method : cursor.getDeclaredMethods()) {
+                if (compatible(method, name, arguments)) {
+                    method.setAccessible(true);
+                    return method;
+                }
+            }
+        }
+        for (Method method : type.getMethods()) {
+            if (compatible(method, name, arguments)) {
+                method.setAccessible(true);
+                return method;
+            }
+        }
+        throw new NoSuchMethodException(type.getName() + "." + name + "/" + arguments.length);
+    }
+
+    private static boolean compatible(Method method, String name, Object[] arguments) {
+        if (!name.equals(method.getName())) return false;
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        if (parameterTypes.length != arguments.length) return false;
+        for (int index = 0; index < parameterTypes.length; index++) {
+            Object argument = arguments[index];
+            if (argument == null) {
+                if (parameterTypes[index].isPrimitive()) return false;
+                continue;
+            }
+            if (!boxedType(parameterTypes[index]).isInstance(argument)) return false;
+        }
+        return true;
+    }
+
+    private static Class<?> boxedType(Class<?> type) {
+        if (!type.isPrimitive()) return type;
+        if (type == boolean.class) return Boolean.class;
+        if (type == byte.class) return Byte.class;
+        if (type == short.class) return Short.class;
+        if (type == int.class) return Integer.class;
+        if (type == long.class) return Long.class;
+        if (type == float.class) return Float.class;
+        if (type == double.class) return Double.class;
+        if (type == char.class) return Character.class;
+        return type;
     }
 
     private static String requiredString(Bundle extras, String key) {

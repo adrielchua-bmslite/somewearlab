@@ -27,15 +27,15 @@ For a complete transfer to another developer, follow [the handover guide](handov
 
 ## Verified status
 
-Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. Gateway v9 binds a signature-protected receive service for the lifetime of SC3's client and exposes non-secret receive health instead of silently dropping callback failures. A retained `MessagePayload` passed through the real `RouterPayload` parser into the SDK Flow on Android. The fresh-install path also includes a gateway-hosted offline QR scanner, Somewear invite enrollment, remote workspace synchronization, provisioning status, activation, readiness, and non-secret mesh-key status.
+Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. Gateway v10 also makes the connection observer state-change-only and exposes typed hardware settings plus a guarded factory reset. On Android, an unchanged disconnected state produced exactly one observer emission over 2.5 seconds; every new settings call traversed SDK/IPC safely, the retained settings/reset reflection bridge was verified, and disconnected mutations returned `NOT_CONNECTED` without a crash. A retained `MessagePayload` also passed through the real `RouterPayload` parser into the SDK Flow. The fresh-install path includes a gateway-hosted offline QR scanner, Somewear invite enrollment, remote workspace synchronization, provisioning status, activation, readiness, and non-secret mesh-key status.
 
-Physical Bluetooth/USB connection and real radio/satellite delivery still require two provisioned Somewear Nodes for hardware acceptance testing.
+Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, and real radio/satellite delivery still require provisioned Somewear Nodes for hardware acceptance testing.
 
 ## Artifacts
 
 - Kotlin AAR: `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
 - Local-AAR dependency block: `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts`
-- SDK AAR SHA-256: `b3a5f279efc480ebafc4a03a203ed25c7ae294cd9014eca7e57b72f650eb31a8`
+- SDK AAR SHA-256: `e0ba8e553e24a90587f8514c049ab3a49284284cb522b44913d4babb602f00d4`
 - Gateway base APK: `build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk`
 - Gateway ABI/configuration splits: the other four APKs in `build/signed-splits-v2/`.
 
