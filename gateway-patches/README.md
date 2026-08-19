@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v10. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v11. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -19,6 +19,9 @@
   `getReceiveHealth`; callback exceptions are no longer silently swallowed.
 - exposes the retained Node hardware-settings, connection-mode, and guarded
   factory-reset workflows without exporting vendor objects to SC3.
+- preflights the fully encoded Somewear package and carries oversized
+  `RADIO_ONLY` JSON as checksummed ordinary radio `MessagePayload` records,
+  with bounded receiver-side reassembly and aggregate delivery status.
 - rejects unknown provider methods before reading raw-payload extras and invokes
   the last-known-good legacy raw dispatcher only for recognized API-v1 methods;
   API v2 never exposes raw payload calls.

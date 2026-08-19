@@ -256,6 +256,11 @@ internal class ContentProviderSomewearClient(
                     SomewearGatewayContract.Key.ACCEPTED_AT_MS,
                     System.currentTimeMillis(),
                 ),
+                fragmentCount = bundle.getInt(SomewearGatewayContract.Key.FRAGMENT_COUNT, 1),
+                radioFragmented = bundle.getBoolean(
+                    SomewearGatewayContract.Key.RADIO_FRAGMENTED,
+                    false,
+                ),
             )
         }
     }
@@ -785,6 +790,7 @@ internal class ContentProviderSomewearClient(
             "ENVIRONMENT_MISMATCH" -> SomewearErrorCode.ENVIRONMENT_MISMATCH
             "JOIN_FAILED" -> SomewearErrorCode.JOIN_FAILED
             "RECEIVE_FAILED" -> SomewearErrorCode.RECEIVE_FAILED
+            "PAYLOAD_TOO_LARGE_FOR_RADIO" -> SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO
             "MALFORMED_RESPONSE" -> SomewearErrorCode.MALFORMED_RESPONSE
             "NO_DEVICE_FOUND" -> SomewearErrorCode.USB_NO_DEVICE
             "NO_DEVICE_DRIVER_FOUND" -> SomewearErrorCode.USB_NO_DRIVER

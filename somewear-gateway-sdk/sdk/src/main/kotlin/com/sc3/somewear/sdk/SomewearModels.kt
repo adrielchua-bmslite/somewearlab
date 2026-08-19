@@ -36,6 +36,7 @@ public enum class SomewearErrorCode {
     ENVIRONMENT_MISMATCH,
     JOIN_FAILED,
     RECEIVE_FAILED,
+    PAYLOAD_TOO_LARGE_FOR_RADIO,
     MALFORMED_RESPONSE,
     INTERNAL,
 }
@@ -175,6 +176,8 @@ public data class SendReceipt(
     val messageId: String,
     val parcelId: Int?,
     val acceptedAtEpochMillis: Long,
+    val fragmentCount: Int = 1,
+    val radioFragmented: Boolean = false,
 )
 
 public enum class DeliveryStatus {

@@ -14,6 +14,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -24,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -38,6 +40,7 @@ public final class GatewayV2 {
     private static final String LOG_TAG = "SC3-Somewear-Gateway";
     private static final Object LOCK = new Object();
     private static final int MAX_INCOMING_MESSAGES = 2_000;
+    private static final int RADIO_MTU_BYTES = 340;
     private static final long DEFAULT_WORKSPACE_TIMEOUT_MS = 45_000L;
     private static final long MAX_WORKSPACE_TIMEOUT_MS = 120_000L;
     private static final long DEFAULT_SETTINGS_TIMEOUT_MS = 30_000L;
@@ -57,7 +60,10 @@ public final class GatewayV2 {
     private static final int HARDWARE_SETTING_COUNT = 32;
     private static final List<Bundle> INCOMING = new ArrayList<>();
     private static final Map<String, Bundle> DELIVERY = new LinkedHashMap<>();
-    private static final Map<String, String> TRACE_TO_MESSAGE = new LinkedHashMap<>();
+    private static final RadioMessageReassembler RADIO_REASSEMBLER =
+            new RadioMessageReassembler();
+    private static final FragmentDeliveryTracker DELIVERY_TRACKER =
+            new FragmentDeliveryTracker();
 
     private static Context appContext;
     private static Object payloadSubscription;
@@ -69,8 +75,12 @@ public final class GatewayV2 {
     private static long lastRouterCallbackAt;
     private static long lastInboundMessageAt;
     private static long lastReceiveErrorAt;
+    private static long inboundRadioFragmentCount;
+    private static long completedRadioMessageCount;
+    private static long invalidRadioFragmentCount;
     private static String lastPayloadType;
     private static String lastReceiveError;
+    private static Object compositePackager;
 
     private GatewayV2() {}
 
@@ -91,6 +101,9 @@ public final class GatewayV2 {
             if ("startReceiving".equals(method)) return startReceivingResult();
             if ("testInjectIncomingMessage".equals(method)) return injectIncoming(extras);
             if ("testDispatchRouterMessage".equals(method)) return dispatchTestRouterMessage(extras);
+            if ("testDispatchFramedRouterMessage".equals(method)) {
+                return dispatchTestFramedRouterMessage(extras);
+            }
             if ("testInspectHardwareSettingsPatch".equals(method)) {
                 return inspectTestHardwareSettingsPatch();
             }
@@ -186,6 +199,7 @@ public final class GatewayV2 {
                 "bluetooth",
                 "usb_connect",
                 "radio_only",
+                "radio_fragmentation",
                 "satellite_only",
                 "delivery_status",
                 "incoming_messages",
@@ -650,49 +664,177 @@ public final class GatewayV2 {
         ensureCoreStarted();
         ensurePayloadSubscription();
 
-        Class<?> messagePayloadClass = Class.forName(
-                "com.somewearlabs.somewearcore.api.MessagePayload"
-        );
-        Object payload = messagePayloadClass
-                .getMethod("build", String.class, long.class)
-                .invoke(null, content, workspaceId);
+        List<Object> payloads = new ArrayList<>();
+        Object originalPayload = buildMessagePayload(content, workspaceId);
+        int originalTransmissionCount = approximateTransmissionCount(originalPayload);
+        if ("Radio".equals(channel)) {
+            Log.i(
+                    LOG_TAG,
+                    "Radio payload preflight; contentUtf8Bytes="
+                            + content.getBytes(StandardCharsets.UTF_8).length
+                            + "; transmissions=" + originalTransmissionCount
+            );
+        }
+        if ("Radio".equals(channel) && originalTransmissionCount > 1) {
+            try {
+                payloads.addAll(buildRadioFragmentPayloads(messageId, content, workspaceId));
+            } catch (IllegalArgumentException exception) {
+                return error("PAYLOAD_TOO_LARGE_FOR_RADIO", exception.getMessage());
+            }
+        } else {
+            payloads.add(originalPayload);
+        }
 
-        String traceId = String.valueOf(invokeNoArgs(payload, "getTraceId"));
-        int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
+        List<Integer> parcelIds = new ArrayList<>(payloads.size());
+        for (Object payload : payloads) {
+            parcelIds.add(((Number) invokeNoArgs(payload, "getParcelId")).intValue());
+        }
         long acceptedAt = System.currentTimeMillis();
 
         synchronized (LOCK) {
-            TRACE_TO_MESSAGE.put(traceId, messageId);
+            DELIVERY_TRACKER.register(messageId, channel, parcelIds);
             DELIVERY.put(
                     messageId,
                     deliveryBundle(messageId, "QUEUED", channel.toUpperCase(), null, acceptedAt)
             );
         }
 
+        long timeout = extras.getLong("radio_timeout_ms", 30_000L);
+        Object router = router();
+        Method send = findMethod(router.getClass(), "send", 2);
+        try {
+            for (Object payload : payloads) {
+                send.invoke(router, payload, sendOptions(channel, timeout));
+            }
+        } catch (Throwable throwable) {
+            FragmentDeliveryTracker.Update failed = DELIVERY_TRACKER.fail(
+                    messageId,
+                    channel.toUpperCase(Locale.US),
+                    "Gateway could not queue every radio fragment",
+                    System.currentTimeMillis()
+            );
+            if (failed != null) storeDeliveryUpdate(failed);
+            throwAsException(throwable);
+        }
+
+        Bundle result = ok(
+                payloads.size() == 1
+                        ? "Payload accepted by SomewearRouter with channel " + channel
+                        : "Payload accepted as " + payloads.size() + " radio-safe fragments"
+        );
+        result.putString("message_id", messageId);
+        result.putInt("parcel_id", parcelIds.get(0));
+        result.putInt("fragment_count", payloads.size());
+        result.putBoolean("radio_fragmented", payloads.size() > 1);
+        result.putLong("accepted_at_ms", acceptedAt);
+        return result;
+    }
+
+    private static Object buildMessagePayload(String content, long workspaceId) throws Exception {
+        return Class.forName("com.somewearlabs.somewearcore.api.MessagePayload")
+                .getMethod("build", String.class, long.class)
+                .invoke(null, content, workspaceId);
+    }
+
+    private static List<Object> buildRadioFragmentPayloads(
+            String messageId,
+            String content,
+            long workspaceId
+    ) throws Exception {
+        String transferId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        for (int chunkBytes = RadioMessageFraming.DEFAULT_CHUNK_BYTES;
+                chunkBytes >= RadioMessageFraming.MIN_CHUNK_BYTES;
+                chunkBytes -= 16) {
+            List<String> frames = RadioMessageFraming.split(
+                    messageId,
+                    content,
+                    transferId,
+                    chunkBytes
+            );
+            List<Object> payloads = new ArrayList<>(frames.size());
+            boolean everyFrameFitsRadio = true;
+            for (String frame : frames) {
+                Object payload = buildMessagePayload(frame, workspaceId);
+                if (approximateTransmissionCount(payload) != 1) {
+                    everyFrameFitsRadio = false;
+                    break;
+                }
+                payloads.add(payload);
+            }
+            if (everyFrameFitsRadio) return payloads;
+        }
+        throw new IllegalArgumentException(
+                "The Somewear build cannot fit the SC3 radio-fragment header in one transmission"
+        );
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Object sendOptions(String channel, long timeout) throws Exception {
         Object options = Class.forName("com.somewearlabs.somewearshared.core.api.SendOptions")
                 .getConstructor()
                 .newInstance();
         Class<?> channelClass = Class.forName(
                 "com.somewearlabs.somewearshared.core.api.DevicePayloadChannel"
         );
-        @SuppressWarnings({"unchecked", "rawtypes"})
         Object channelValue = Enum.valueOf((Class<? extends Enum>) channelClass, channel);
         Set<?> channelIntent = Collections.singleton(channelValue);
         invoke(options, "setChannelIntent", channelIntent);
         invoke(options, "setAllowBackhaul", false);
         invoke(options, "setRequiresBackhaulAck", false);
-        long timeout = extras.getLong("radio_timeout_ms", 30_000L);
         invoke(options, "setTimeout", (int) Math.max(1L, Math.min(Integer.MAX_VALUE, timeout)));
+        return options;
+    }
 
-        Object router = router();
-        Method send = findMethod(router.getClass(), "send", 2);
-        send.invoke(router, payload, options);
+    private static int approximateTransmissionCount(Object payload) throws Exception {
+        Class<?> devicePayloadClass = Class.forName(
+                "com.somewearlabs.somewearcore.api.DevicePayload"
+        );
+        Class<?> sendOptionsClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.SendOptions"
+        );
+        Object outbound = Class.forName(
+                "com.somewearlabs.somewearcore.internal.multiplatform.SharedPayloadMappersKt"
+        ).getMethod("toOutboundPayload", devicePayloadClass, sendOptionsClass)
+                .invoke(null, payload, null);
+        Object payloadContent = invokeNoArgs(outbound, "getContent");
+        Class<?> payloadContentClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.database.PayloadContent"
+        );
+        Object hotspotContent = Class.forName(
+                "com.somewearlabs.somewearshared.core.internal.service.SharedRouterImplKt"
+        ).getMethod("toHotspotMailContent", payloadContentClass)
+                .invoke(null, payloadContent);
+        return ((Number) invoke(compositePackager(), "approximateTransmissionCount", hotspotContent))
+                .intValue();
+    }
 
-        Bundle result = ok("Payload accepted by SomewearRouter with channel " + channel);
-        result.putString("message_id", messageId);
-        result.putInt("parcel_id", parcelId);
-        result.putLong("accepted_at_ms", acceptedAt);
-        return result;
+    private static Object compositePackager() throws Exception {
+        synchronized (LOCK) {
+            if (compositePackager != null) return compositePackager;
+            Class<?> idProviderClass = Class.forName(
+                    "com.somewearlabs.somewearshared.core.util.IdProvider"
+            );
+            Object idProvider = Proxy.newProxyInstance(
+                    idProviderClass.getClassLoader(),
+                    new Class<?>[] { idProviderClass },
+                    (proxy, method, args) -> "nextId".equals(method.getName()) ? 1 : null
+            );
+            Class<?> function0Class = Class.forName("kotlin.jvm.functions.Function0");
+            Object mtuProvider = Proxy.newProxyInstance(
+                    function0Class.getClassLoader(),
+                    new Class<?>[] { function0Class },
+                    (proxy, method, args) -> "invoke".equals(method.getName())
+                            ? RADIO_MTU_BYTES
+                            : null
+            );
+            Class<?> packagerClass = Class.forName(
+                    "com.somewearlabs.somewearshared.core.internal.util.CompositePackager"
+            );
+            compositePackager = packagerClass
+                    .getConstructor(idProviderClass, function0Class)
+                    .newInstance(idProvider, mtuProvider);
+            return compositePackager;
+        }
     }
 
     private static Bundle deliveryStatus(Bundle extras) {
@@ -745,6 +887,10 @@ public final class GatewayV2 {
             result.putLong("last_router_callback_at_ms", lastRouterCallbackAt);
             result.putLong("last_inbound_message_at_ms", lastInboundMessageAt);
             result.putLong("last_receive_error_at_ms", lastReceiveErrorAt);
+            result.putLong("inbound_radio_fragment_count", inboundRadioFragmentCount);
+            result.putLong("completed_radio_message_count", completedRadioMessageCount);
+            result.putLong("invalid_radio_fragment_count", invalidRadioFragmentCount);
+            result.putInt("active_radio_reassemblies", RADIO_REASSEMBLER.activeCount());
             result.putString("last_payload_type", lastPayloadType);
             result.putString("last_receive_error", lastReceiveError);
             result.putInt("queued_incoming_count", INCOMING.size());
@@ -774,7 +920,39 @@ public final class GatewayV2 {
         long workspaceId = extras.getLong("workspace_id", 0L);
         if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
         long sourceUserId = extras.getLong("sender_id_long", 42L);
+        dispatchInboundTestContent(content, workspaceId, sourceUserId);
+        return ok("Test RouterPayload dispatched");
+    }
 
+    /** Exercises framing plus the real retained MessagePayload/RouterPayload receive parser. */
+    private static Bundle dispatchTestFramedRouterMessage(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String messageId = requiredString(extras, "message_id");
+        String content = requiredString(extras, "message");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        long sourceUserId = extras.getLong("sender_id_long", 42L);
+        List<String> frames = RadioMessageFraming.split(
+                messageId,
+                content,
+                "0123456789abcdef",
+                RadioMessageFraming.DEFAULT_CHUNK_BYTES
+        );
+        if (extras.getBoolean("reverse_order", false)) Collections.reverse(frames);
+        for (String frame : frames) {
+            dispatchInboundTestContent(frame, workspaceId, sourceUserId);
+        }
+        Bundle result = ok("Test framed RouterPayloads dispatched");
+        result.putInt("fragment_count", frames.size());
+        return result;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void dispatchInboundTestContent(
+            String content,
+            long workspaceId,
+            long sourceUserId
+    ) throws Exception {
         Class<?> messageClass = Class.forName(
                 "com.somewearlabs.somewearcore.api.MessagePayload"
         );
@@ -818,7 +996,6 @@ public final class GatewayV2 {
                 )
                 .newInstance(payload, status, channel);
         handleRouterPayload(routerPayload);
-        return ok("Test RouterPayload dispatched");
     }
 
     private static Bundle connectUsb() throws Exception {
@@ -1251,6 +1428,9 @@ public final class GatewayV2 {
         synchronized (LOCK) {
             subscription = payloadSubscription;
             payloadSubscription = null;
+            DELIVERY_TRACKER.clear();
+            RADIO_REASSEMBLER.clear();
+            compositePackager = null;
         }
         if (subscription != null) {
             try {
@@ -1336,31 +1516,27 @@ public final class GatewayV2 {
             String channel = String.valueOf(invokeNoArgs(routerPayload, "getDeliveredDeviceChannel"));
             String status = String.valueOf(invokeNoArgs(routerPayload, "getSummaryStatus"));
             String traceId = String.valueOf(invokeNoArgs(payload, "getTraceId"));
+            int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
             long now = System.currentTimeMillis();
 
             if (outbound) {
-                synchronized (LOCK) {
-                    String messageId = TRACE_TO_MESSAGE.get(traceId);
-                    if (messageId != null) {
-                        String errorReason = null;
-                        Object routingInfo = invokeNoArgs(payload, "getRoutingInfo");
-                        try {
-                            Object reason = invokeNoArgs(routingInfo, "getErrorReason");
-                            errorReason = reason == null ? null : String.valueOf(reason);
-                        } catch (Throwable ignored) {
-                            // Optional field varies across core releases.
-                        }
-                        DELIVERY.put(
-                                messageId,
-                                deliveryBundle(
-                                        messageId,
-                                        status.toUpperCase(),
-                                        channel.toUpperCase(),
-                                        errorReason,
-                                        now
-                                )
-                        );
-                    }
+                String errorReason = null;
+                Object routingInfo = invokeNoArgs(payload, "getRoutingInfo");
+                try {
+                    Object reason = invokeNoArgs(routingInfo, "getErrorReason");
+                    errorReason = reason == null ? null : String.valueOf(reason);
+                } catch (Throwable ignored) {
+                    // Optional field varies across core releases.
+                }
+                FragmentDeliveryTracker.Update aggregate = DELIVERY_TRACKER.update(
+                        parcelId,
+                        status,
+                        channel,
+                        errorReason,
+                        now
+                );
+                if (aggregate != null) {
+                    storeDeliveryUpdate(aggregate);
                 }
                 return;
             }
@@ -1375,14 +1551,54 @@ public final class GatewayV2 {
             long workspaceId = ((Number) invokeNoArgs(payload, "getWorkspaceId")).longValue();
             long sourceUserId = ((Number) invokeNoArgs(payload, "getSourceUserId")).longValue();
             Date timestamp = (Date) invokeNoArgs(payload, "getTimestamp");
-            enqueueIncoming(
-                    traceId,
+            long receivedAt = timestamp == null ? now : timestamp.getTime();
+            String senderId = String.valueOf(sourceUserId);
+            String deliveredChannel = channel.toUpperCase(Locale.US);
+            RadioMessageReassembler.Result reassembly = RADIO_REASSEMBLER.accept(
                     content,
                     workspaceId,
-                    String.valueOf(sourceUserId),
-                    channel.toUpperCase(),
-                    timestamp == null ? now : timestamp.getTime()
+                    senderId,
+                    deliveredChannel,
+                    receivedAt
             );
+            switch (reassembly.kind) {
+                case NOT_FRAME:
+                    enqueueIncoming(
+                            traceId,
+                            content,
+                            workspaceId,
+                            senderId,
+                            deliveredChannel,
+                            receivedAt
+                    );
+                    break;
+                case PENDING:
+                    synchronized (LOCK) {
+                        inboundRadioFragmentCount++;
+                    }
+                    break;
+                case COMPLETE:
+                    synchronized (LOCK) {
+                        inboundRadioFragmentCount++;
+                        completedRadioMessageCount++;
+                    }
+                    enqueueIncoming(
+                            reassembly.messageId,
+                            reassembly.content,
+                            workspaceId,
+                            senderId,
+                            deliveredChannel,
+                            reassembly.completedAt
+                    );
+                    break;
+                case INVALID:
+                    synchronized (LOCK) {
+                        inboundRadioFragmentCount++;
+                        invalidRadioFragmentCount++;
+                    }
+                    recordReceiveError("REASSEMBLY", new IllegalArgumentException());
+                    break;
+            }
         } catch (Throwable error) {
             // Never include payload content or exception messages in diagnostics.
             recordReceiveError("PARSE", error);
@@ -1437,6 +1653,20 @@ public final class GatewayV2 {
         result.putString("error_reason", errorReason);
         result.putLong("updated_at_ms", updatedAt);
         return result;
+    }
+
+    private static void storeDeliveryUpdate(FragmentDeliveryTracker.Update update) {
+        synchronized (LOCK) {
+            Bundle bundle = deliveryBundle(
+                    update.messageId,
+                    update.status,
+                    update.channel,
+                    update.errorReason,
+                    update.updatedAt
+            );
+            bundle.putInt("fragment_count", update.fragmentCount);
+            DELIVERY.put(update.messageId, bundle);
+        }
     }
 
     private static Object router() throws Exception {

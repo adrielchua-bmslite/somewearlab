@@ -95,6 +95,8 @@ public object SomewearGatewayContract {
         public const val ROUTE_POLICY: String = "route_policy"
         public const val RADIO_TIMEOUT_MS: String = "radio_timeout_ms"
         public const val PARCEL_ID: String = "parcel_id"
+        public const val FRAGMENT_COUNT: String = "fragment_count"
+        public const val RADIO_FRAGMENTED: String = "radio_fragmented"
         public const val ACCEPTED_AT_MS: String = "accepted_at_ms"
 
         public const val DELIVERY_STATUS: String = "delivery_status"

@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v10 implements standalone initialization, a state-change-only connection observer, Node hardware settings, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, inbound router bridging, delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v11 implements standalone initialization, a state-change-only connection observer, Node hardware settings, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, radio-safe JSON fragmentation/reassembly, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -321,7 +321,7 @@ Encoded form:
 }
 ```
 
-Keep the payload small. `bodyJson` must be valid JSON and is inserted into the envelope without additional quoting.
+`bodyJson` must be valid JSON and is inserted into the envelope without additional quoting.
 
 ### Send a message
 
@@ -337,6 +337,22 @@ val request = SendRequest(
 
 val receipt = somewear.send(request)
 ```
+
+For `RADIO_ONLY`, gateway v11 measures the fully encoded Somewear package. If
+it exceeds one radio transmission, the gateway splits it into small ordinary
+`MessagePayload` records that all retain a Radio-only `SendOptions`. The peer
+gateway validates the checksum, accepts duplicate or out-of-order fragments,
+reassembles the original UTF-8 JSON, and emits one `IncomingMessage` with the
+original `messageId`.
+
+Both devices must run the same v11 gateway build for fragmented messages.
+Unfragmented small messages remain compatible with older gateways.
+
+`SendReceipt.fragmentCount` reports the number of ordinary radio messages
+queued, and `SendReceipt.radioFragmented` is true when this protection was
+used. The current bounded radio-framing limit is 64 KiB for the message ID plus
+content. A larger request returns
+`SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO` without enabling satellite.
 
 Available policies:
 
@@ -370,7 +386,7 @@ lifecycleScope.launch {
 
 Terminal states are `DELIVERED`, `ERROR`, `CANCELED`, and `COLLAPSED`. `deliveredChannel` reports the channel actually used, including Radio or Satellite.
 
-An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acceptance and `DeliveryUpdate` as delivery evidence.
+An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acceptance and `DeliveryUpdate` as delivery evidence. For a fragmented radio message, `DELIVERED` is reported only after every fragment is delivered; one fragment error fails the original SC3 message and identifies the failed fragment in `errorReason`.
 
 ### Incoming messages
 
@@ -610,7 +626,7 @@ Every method returns a `Bundle` with:
 | `factoryReset` | `factory_reset_confirmation: ERASE_NODE` | destructive reset result |
 | `disconnect` | none | common result |
 | `shutdown` | none | common result |
-| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `accepted_at_ms` |
+| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `radio_fragmented`, `accepted_at_ms` |
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
 | `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, queue, and last-event counters |
@@ -637,7 +653,7 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v10 | Validation/work remaining |
+| Capability | Gateway v11 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -647,8 +663,9 @@ delivered_channel: String
 | Read/update Node hardware settings | Yes | Retained settings types and disconnected safety validated on Android; live Node acknowledgement still requires hardware acceptance |
 | Factory reset with explicit confirmation | Yes | Retained device-management bridge verified on Android; destructive live-Node test intentionally not run |
 | Explicit radio/satellite `SendOptions` | Yes | Hardware validation |
+| Oversized JSON over Radio without Satellite | Yes | Unit tested plus Android sender preflight and two-emulator normal/reverse-order reassembly; physical peer-radio acceptance remains |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
-| Delivery status and actual channel | Yes | Hardware validation |
+| Delivery status and actual channel | Yes | Multi-fragment aggregation unit tested; live Node terminal acknowledgements require hardware validation |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
 | QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |
@@ -664,9 +681,10 @@ Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back t
 4. Subscribe to `SomewearRouter.getPayload()` for inbound payloads and status updates.
 5. Export `RouterPayload.summaryStatus` and `RouterPayload.deliveredDeviceChannel`.
 6. Make `RADIO_ONLY` the safe default and never widen its channel set.
-7. Keep USB/Bluetooth permissions and connection ownership in the gateway package.
-8. Run long-lived connection and inbound collection work from a foreground or bound service. The ContentProvider may remain as the command/polling compatibility surface.
-9. Do not export authentication secrets, traffic keys, or mesh-key bytes through IPC.
+7. Split oversized Radio traffic above Somewear Core into ordinary `MessagePayload` records; never use the retained Radio `PackageType.Part` path.
+8. Keep USB/Bluetooth permissions and connection ownership in the gateway package.
+9. Run long-lived connection and inbound collection work from a foreground or bound service. The ContentProvider may remain as the command/polling compatibility surface.
+10. Do not export authentication secrets, traffic keys, or mesh-key bytes through IPC.
 
 ## Security and deployment
 

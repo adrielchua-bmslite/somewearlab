@@ -27,7 +27,7 @@ For a complete transfer to another developer, follow [the handover guide](handov
 
 ## Verified status
 
-Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. Gateway v10 also makes the connection observer state-change-only and exposes typed hardware settings plus a guarded factory reset. On Android, an unchanged disconnected state produced exactly one observer emission over 2.5 seconds; every new settings call traversed SDK/IPC safely, the retained settings/reset reflection bridge was verified, and disconnected mutations returned `NOT_CONNECTED` without a crash. A retained `MessagePayload` also passed through the real `RouterPayload` parser into the SDK Flow. The fresh-install path includes a gateway-hosted offline QR scanner, Somewear invite enrollment, remote workspace synchronization, provisioning status, activation, readiness, and non-secret mesh-key status.
+Gateway API v2 passed a bidirectional two-emulator contract test for initialization, explicit radio-only routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, and safe rejection of automatic satellite fallback. Gateway v11 also measures the real encoded package and replaces the retained core's Satellite-only composite behavior with checksummed ordinary Radio messages. A 932-byte JSON sender test queued eight Radio messages with zero Satellite attempts, and both emulators reassembled an eight-fragment JSON through the retained `MessagePayload`/`RouterPayload` receive path in normal and reverse order. The connection observer is state-change-only, hardware settings and guarded factory reset are exposed, and the fresh-install path includes gateway-hosted offline QR scanning, workspace enrollment/synchronization, provisioning status, activation, readiness, and non-secret mesh-key status.
 
 Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, and real radio/satellite delivery still require provisioned Somewear Nodes for hardware acceptance testing.
 
@@ -35,7 +35,7 @@ Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, 
 
 - Kotlin AAR: `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
 - Local-AAR dependency block: `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts`
-- SDK AAR SHA-256: `e0ba8e553e24a90587f8514c049ab3a49284284cb522b44913d4babb602f00d4`
+- SDK AAR SHA-256: `229d4b42c536e221290ca308f514100ba1f8df82a0441e307f50a56ef2c3cb87`
 - Gateway base APK: `build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk`
 - Gateway ABI/configuration splits: the other four APKs in `build/signed-splits-v2/`.
 
