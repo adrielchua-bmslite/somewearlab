@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v11 implements standalone initialization, a state-change-only connection observer, Node hardware settings, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, radio-safe JSON fragmentation/reassembly, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v12 implements standalone initialization, a state-change-only connection observer, Node hardware settings, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, radio-safe JSON fragmentation/reassembly, duplicate-filter-safe fragment timestamps, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -338,14 +338,20 @@ val request = SendRequest(
 val receipt = somewear.send(request)
 ```
 
-For `RADIO_ONLY`, gateway v11 measures the fully encoded Somewear package. If
+For `RADIO_ONLY`, gateway v12 measures the fully encoded Somewear package. If
 it exceeds one radio transmission, the gateway splits it into small ordinary
 `MessagePayload` records that all retain a Radio-only `SendOptions`. The peer
 gateway validates the checksum, accepts duplicate or out-of-order fragments,
 reassembles the original UTF-8 JSON, and emits one `IncomingMessage` with the
 original `messageId`.
 
-Both devices must run the same v11 gateway build for fragmented messages.
+The retained Somewear receiver considers messages with the same source and
+whole-second timestamp to be duplicates even when their bytes differ. Gateway
+v12 therefore gives every fragment a distinct timestamp and persists the last
+reservation so timestamps are not reused after process restart. Generic Raw
+payloads are not used because the retained router removes Radio from that type.
+
+Both devices must run the same v12 gateway build for fragmented messages.
 Unfragmented small messages remain compatible with older gateways.
 
 `SendReceipt.fragmentCount` reports the number of ordinary radio messages
@@ -653,7 +659,7 @@ delivered_channel: String
 
 ## Gateway compatibility
 
-| Capability | Gateway v11 | Validation/work remaining |
+| Capability | Gateway v12 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -663,7 +669,7 @@ delivered_channel: String
 | Read/update Node hardware settings | Yes | Retained settings types and disconnected safety validated on Android; live Node acknowledgement still requires hardware acceptance |
 | Factory reset with explicit confirmation | Yes | Retained device-management bridge verified on Android; destructive live-Node test intentionally not run |
 | Explicit radio/satellite `SendOptions` | Yes | Hardware validation |
-| Oversized JSON over Radio without Satellite | Yes | Unit tested plus Android sender preflight and two-emulator normal/reverse-order reassembly; physical peer-radio acceptance remains |
+| Oversized JSON over Radio without Satellite | Yes | Unit tested; two Android runtimes queued eight distinct-timestamp Radio fragments for 932 bytes, normal/reverse-order reassembly passed, 60,000 bytes produced 469 fragments without a core crash, and restart persistence passed; post-fix physical peer-radio acceptance remains |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
 | Delivery status and actual channel | Yes | Multi-fragment aggregation unit tested; live Node terminal acknowledgements require hardware validation |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |

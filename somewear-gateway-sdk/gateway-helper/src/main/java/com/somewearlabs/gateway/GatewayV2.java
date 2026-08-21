@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
@@ -38,6 +39,8 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class GatewayV2 {
     private static final String LOG_TAG = "SC3-Somewear-Gateway";
+    private static final String STATE_PREFERENCES = "sc3_somewear_gateway_state";
+    private static final String LAST_RADIO_FRAGMENT_SECOND = "last_radio_fragment_second";
     private static final Object LOCK = new Object();
     private static final int MAX_INCOMING_MESSAGES = 2_000;
     private static final int RADIO_MTU_BYTES = 340;
@@ -200,6 +203,7 @@ public final class GatewayV2 {
                 "usb_connect",
                 "radio_only",
                 "radio_fragmentation",
+                "radio_fragment_dedup",
                 "satellite_only",
                 "delivery_status",
                 "incoming_messages",
@@ -736,6 +740,73 @@ public final class GatewayV2 {
                 .invoke(null, content, workspaceId);
     }
 
+    /**
+     * Builds a MessagePayload with a caller-controlled timestamp.
+     *
+     * <p>The retained core identifies inbound Message payload duplicates using
+     * only package type, source user and whole-second timestamp. SC3 radio
+     * fragments are different messages queued within one second, so the normal
+     * two-argument builder makes the receiver discard fragment three onward.
+     * Supplying a distinct timestamp for each fragment preserves the proven
+     * mesh-supported Message transport without patching the vendor core.</p>
+     */
+    private static Object buildMessagePayload(
+            String content,
+            long workspaceId,
+            long timestampMillis
+    ) throws Exception {
+        Class<?> messageClass = Class.forName(
+                "com.somewearlabs.somewearcore.api.MessagePayload"
+        );
+        Object companion = messageClass.getField("Companion").get(null);
+        Method datedBuilder = findMethod(companion.getClass(), "build", 9);
+        return datedBuilder.invoke(
+                companion,
+                content,
+                new Date(timestampMillis),
+                Long.toString(workspaceId),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    private static RadioFragmentTimestamps.Reservation reserveRadioFragmentTimestamps(
+            int fragmentCount
+    ) {
+        Context context = appContext;
+        if (context == null) {
+            throw new IllegalStateException("GatewayV2.initialize(Context) was not called");
+        }
+        synchronized (LOCK) {
+            SharedPreferences preferences = context.getSharedPreferences(
+                    STATE_PREFERENCES,
+                    Context.MODE_PRIVATE
+            );
+            long persistedLastSecond = preferences.getLong(
+                    LAST_RADIO_FRAGMENT_SECOND,
+                    0L
+            );
+            RadioFragmentTimestamps.Reservation reservation =
+                    RadioFragmentTimestamps.reserve(
+                            System.currentTimeMillis(),
+                            persistedLastSecond,
+                            fragmentCount
+                    );
+            if (!preferences.edit()
+                    .putLong(LAST_RADIO_FRAGMENT_SECOND, reservation.lastEpochSecond)
+                    .commit()) {
+                throw new IllegalStateException(
+                        "Could not persist the radio fragment timestamp reservation"
+                );
+            }
+            return reservation;
+        }
+    }
+
     private static List<Object> buildRadioFragmentPayloads(
             String messageId,
             String content,
@@ -761,7 +832,26 @@ public final class GatewayV2 {
                 }
                 payloads.add(payload);
             }
-            if (everyFrameFitsRadio) return payloads;
+            if (everyFrameFitsRadio) {
+                RadioFragmentTimestamps.Reservation timestamps =
+                        reserveRadioFragmentTimestamps(frames.size());
+                payloads.clear();
+                for (int index = 0; index < frames.size(); index++) {
+                    payloads.add(buildMessagePayload(
+                            frames.get(index),
+                            workspaceId,
+                            timestamps.timestampMillis(index)
+                    ));
+                }
+                Log.i(
+                        LOG_TAG,
+                        "Reserved duplicate-safe radio fragment timestamps; count="
+                                + frames.size()
+                                + "; firstEpochSecond=" + timestamps.firstEpochSecond
+                                + "; lastEpochSecond=" + timestamps.lastEpochSecond
+                );
+                return payloads;
+            }
         }
         throw new IllegalArgumentException(
                 "The Somewear build cannot fit the SC3 radio-fragment header in one transmission"
