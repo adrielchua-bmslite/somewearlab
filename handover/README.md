@@ -181,8 +181,11 @@ the Node and stored local bond/device and normally disconnects immediately.
 `nodeTelemetry()` exposes the retained 0..5 satellite-quality value (sendable
 at 2 or above), battery/firmware/tracking state, and other non-secret Node
 health. `meshNetworkStatus()` exposes the latest mesh peer/next-hop/hops/RSSI
-snapshot. These reads do not select a transport. SC3 must still use an explicit
-`RoutePolicy` for every send.
+snapshot. Its `signalQuality` property converts the Node's raw mesh value to
+`UNKNOWN`, `FAR`, `SOMEWHAT_CLOSE`, or `CLOSE` using the retained Somewear
+thresholds. This is Node-to-Node mesh strength, not Bluetooth strength. These
+reads do not select a transport. SC3 must still use an explicit `RoutePolicy`
+for every send.
 
 For images/documents, call `sendFile(FileSendRequest)` with an Android content
 URI. The SDK streams the file to a Somewear signed upload URL, then sends only

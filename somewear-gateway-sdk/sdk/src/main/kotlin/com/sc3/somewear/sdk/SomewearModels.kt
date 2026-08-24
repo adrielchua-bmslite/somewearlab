@@ -117,7 +117,31 @@ public data class MeshNetworkStatus(
     val canBackhaulData: Boolean?,
     val updatedAtEpochMillis: Long?,
     val sampledAtEpochMillis: Long,
-)
+) {
+    /** Human-readable receive strength using the thresholds in the retained Somewear core. */
+    val signalQuality: MeshSignalQuality
+        get() = MeshSignalQuality.fromRssi(signalRssi)
+}
+
+/** Receive-side Node-to-Node mesh signal quality; this is not Bluetooth RSSI. */
+public enum class MeshSignalQuality {
+    UNKNOWN,
+    FAR,
+    SOMEWHAT_CLOSE,
+    CLOSE,
+    ;
+
+    public companion object {
+        /** Converts the Somewear mesh RSSI/link-score value to the vendor's quality bands. */
+        @JvmStatic
+        public fun fromRssi(rssi: Int?): MeshSignalQuality = when {
+            rssi == null || rssi < 100 -> UNKNOWN
+            rssi < 148 -> FAR
+            rssi < 214 -> SOMEWHAT_CLOSE
+            else -> CLOSE
+        }
+    }
+}
 
 public enum class NodeConnectionMode(public val wireValue: String) {
     BLUETOOTH("BLUETOOTH"),

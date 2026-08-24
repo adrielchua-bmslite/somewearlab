@@ -251,6 +251,15 @@ Read one snapshot or collect changes:
 val telemetry = somewear.nodeTelemetry()
 val mesh = somewear.meshNetworkStatus()
 
+when (mesh) {
+    is SomewearResult.Success -> {
+        val rawRssi = mesh.value.signalRssi
+        val quality = mesh.value.signalQuality
+        // quality is UNKNOWN, FAR, SOMEWHAT_CLOSE, or CLOSE.
+    }
+    is SomewearResult.Failure -> showError(mesh.error)
+}
+
 lifecycleScope.launch {
     somewear.observeNodeTelemetry().collect(::renderTelemetry)
 }
@@ -269,6 +278,10 @@ nullable when the core has not received a valid value from the Node.
 `MeshNetworkStatus` reports the latest peer, next hop, hop count, RSSI, and
 backhaul flag. `available=false` means the core currently has only its empty
 mesh snapshot; do not treat its timestamp as evidence that a peer is reachable.
+`signalQuality` converts the raw Somewear mesh RSSI/link score using the same
+bands as the retained core: below 100 is `UNKNOWN`, 100-147 is `FAR`, 148-213
+is `SOMEWHAT_CLOSE`, and 214 or above is `CLOSE`. This measures the most recent
+Node-to-Node mesh update, not the phone-to-Node Bluetooth connection.
 
 Power commands require a connected Node:
 
