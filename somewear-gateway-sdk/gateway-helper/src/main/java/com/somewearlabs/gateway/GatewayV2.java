@@ -62,6 +62,7 @@ public final class GatewayV2 {
     private static final int SETTING_RADIO_MODE = 25;
     private static final int HARDWARE_SETTING_COUNT = 32;
     private static final List<Bundle> INCOMING = new ArrayList<>();
+    private static final List<Bundle> INCOMING_FILES = new ArrayList<>();
     private static final Map<String, Bundle> DELIVERY = new LinkedHashMap<>();
     private static final RadioMessageReassembler RADIO_REASSEMBLER =
             new RadioMessageReassembler();
@@ -71,6 +72,7 @@ public final class GatewayV2 {
     private static Context appContext;
     private static Object payloadSubscription;
     private static long nextSequence = 1L;
+    private static long nextFileSequence = 1L;
     private static long routerCallbackCount;
     private static long inboundMessageCount;
     private static long ignoredInboundCount;
@@ -84,6 +86,7 @@ public final class GatewayV2 {
     private static String lastPayloadType;
     private static String lastReceiveError;
     private static Object compositePackager;
+    private static Object fileRemoteSource;
 
     private GatewayV2() {}
 
@@ -98,14 +101,22 @@ public final class GatewayV2 {
         try {
             if ("info".equals(method)) return info();
             if ("sendMessageV2".equals(method)) return sendMessage(extras);
+            if ("cancelMessage".equals(method)) return cancelMessage(extras);
             if ("getDeliveryStatus".equals(method)) return deliveryStatus(extras);
             if ("pollIncomingMessages".equals(method)) return pollIncoming(extras);
+            if ("prepareFileUpload".equals(method)) return prepareFileUpload(extras);
+            if ("sendFileMetadata".equals(method)) return sendFileMetadata(extras);
+            if ("pollIncomingFiles".equals(method)) return pollIncomingFiles(extras);
+            if ("getFileDownloadUrl".equals(method)) return fileDownloadUrl(extras);
             if ("getReceiveHealth".equals(method)) return receiveHealth();
             if ("startReceiving".equals(method)) return startReceivingResult();
             if ("testInjectIncomingMessage".equals(method)) return injectIncoming(extras);
             if ("testDispatchRouterMessage".equals(method)) return dispatchTestRouterMessage(extras);
             if ("testDispatchFramedRouterMessage".equals(method)) {
                 return dispatchTestFramedRouterMessage(extras);
+            }
+            if ("testDispatchFileMetadata".equals(method)) {
+                return dispatchTestFileMetadata(extras);
             }
             if ("testInspectHardwareSettingsPatch".equals(method)) {
                 return inspectTestHardwareSettingsPatch();
@@ -114,6 +125,8 @@ public final class GatewayV2 {
                     || "connectUSB".equals(method)
                     || "connect_usb".equals(method)) return connectUsb();
             if ("setConnectionMode".equals(method)) return setConnectionMode(extras);
+            if ("getNodeTelemetry".equals(method)) return nodeTelemetry();
+            if ("getMeshNetworkStatus".equals(method)) return meshNetworkStatus();
             if ("getHardwareSettings".equals(method)) return hardwareSettings();
             if ("setTrackingEnabled".equals(method)) {
                 return updateBooleanSetting(extras, SETTING_TRACKING_ENABLED, false);
@@ -144,6 +157,8 @@ public final class GatewayV2 {
             }
             if ("factoryReset".equals(method)) return factoryReset(extras);
             if ("shutdown".equals(method)) return shutdown();
+            if ("powerOn".equals(method)) return power(true);
+            if ("powerOff".equals(method)) return power(false);
             if ("listWorkspaces".equals(method)) return listWorkspaces();
             if ("syncWorkspaces".equals(method)) return syncWorkspaces(extras);
             if ("joinWorkspace".equals(method)) {
@@ -206,7 +221,16 @@ public final class GatewayV2 {
                 "radio_fragment_dedup",
                 "satellite_only",
                 "delivery_status",
+                "message_cancel",
                 "incoming_messages",
+                "node_telemetry",
+                "satellite_signal",
+                "mesh_network_status",
+                "device_power",
+                "file_upload",
+                "file_metadata_send",
+                "incoming_files",
+                "file_download",
                 "receive_health",
                 "hardware_settings",
                 "tracking_settings",
@@ -740,6 +764,61 @@ public final class GatewayV2 {
                 .invoke(null, content, workspaceId);
     }
 
+    private static Object buildFileMetadataPayload(
+            String id,
+            String name,
+            String mimeType,
+            long createdAt,
+            long uploadedAt,
+            String userId,
+            long size,
+            long workspaceId
+    ) throws Exception {
+        Class<?> idProviderClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.util.IdProvider"
+        );
+        Object randomIdCompanion = Class.forName(
+                "com.somewearlabs.somewearshared.core.util.RandomIdProvider"
+        ).getField("Companion").get(null);
+        Object idProvider = invokeNoArgs(randomIdCompanion, "getInstance");
+        Class<?> payloadInfoClass = Class.forName(
+                "com.somewearlabs.somewearshared.core.api.PayloadInfo"
+        );
+        Object payloadInfoCompanion = payloadInfoClass.getField("Companion").get(null);
+        Object info = findMethod(payloadInfoCompanion.getClass(), "buildOutbound", 5).invoke(
+                payloadInfoCompanion,
+                null,
+                idProvider,
+                0L,
+                0L,
+                workspaceId
+        );
+        Class<?> payloadClass = Class.forName(
+                "com.somewearlabs.somewearcore.api.FileMetadataPayload"
+        );
+        return payloadClass.getConstructor(
+                String.class,
+                String.class,
+                String.class,
+                Date.class,
+                Date.class,
+                String.class,
+                String.class,
+                long.class,
+                payloadInfoClass
+        ).newInstance(
+                id,
+                name,
+                mimeType == null ? "" : mimeType,
+                new Date(createdAt),
+                new Date(uploadedAt),
+                Long.toString(workspaceId),
+                userId == null ? "" : userId,
+                size,
+                info
+        );
+    }
+
     /**
      * Builds a MessagePayload with a caller-controlled timestamp.
      *
@@ -942,6 +1021,39 @@ public final class GatewayV2 {
         }
     }
 
+    private static Bundle cancelMessage(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String messageId = requiredString(extras, "message_id");
+        final FragmentDeliveryTracker.Cancellation cancellation;
+        synchronized (LOCK) {
+            cancellation = DELIVERY_TRACKER.cancel(messageId, System.currentTimeMillis());
+        }
+        if (cancellation == null) {
+            synchronized (LOCK) {
+                Bundle existing = DELIVERY.get(messageId);
+                if (existing == null) return error("NOT_FOUND", "Unknown message_id: " + messageId);
+                String status = existing.getString("delivery_status", "NONE");
+                if ("DELIVERED".equals(status)
+                        || "ERROR".equals(status)
+                        || "CANCELED".equals(status)
+                        || "COLLAPSED".equals(status)) {
+                    return error("INVALID_REQUEST", "The message is already terminal: " + status);
+                }
+            }
+            return error("NOT_FOUND", "No active Somewear parcels for message_id: " + messageId);
+        }
+
+        Object activeRouter = router();
+        for (Integer parcelId : cancellation.parcelIds) {
+            invoke(activeRouter, "cancel", parcelId);
+        }
+        storeDeliveryUpdate(cancellation.update);
+        Bundle result = ok("Somewear message cancellation requested");
+        result.putString("message_id", messageId);
+        result.putInt("fragment_count", cancellation.parcelIds.size());
+        return result;
+    }
+
     private static Bundle pollIncoming(Bundle extras) throws Exception {
         if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
         ensureCoreStarted();
@@ -963,6 +1075,218 @@ public final class GatewayV2 {
         }
         Bundle result = ok("Incoming messages");
         result.putParcelableArrayList("items", items);
+        return result;
+    }
+
+    private static Bundle prepareFileUpload(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String name = requiredString(extras, "file_name");
+        String mimeType = extras.getString("mime_type", "application/octet-stream");
+        String sha256 = requiredString(extras, "file_sha256").toLowerCase(Locale.US);
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        long fileSize = extras.getLong("file_size_bytes", -1L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        if (fileSize < 0L) return error("INVALID_REQUEST", "file_size_bytes must be non-negative");
+        if (!sha256.matches("[0-9a-f]{64}")) {
+            return error("INVALID_REQUEST", "file_sha256 must be a lowercase SHA-256 hex digest");
+        }
+
+        ensureCoreStarted();
+        final Object response;
+        try {
+            response = invokeSuspend(
+                    fileRemoteSource(),
+                    "getFileUploadUrl",
+                    DEFAULT_WORKSPACE_TIMEOUT_MS,
+                    name,
+                    mimeType,
+                    sha256,
+                    Long.toString(workspaceId),
+                    fileSize
+            );
+        } catch (SuspendTimeoutException timeout) {
+            return error("TIMEOUT", "Timed out obtaining the Somewear file upload ticket");
+        } catch (Throwable failure) {
+            return error(
+                    "FILE_UPLOAD_FAILED",
+                    "Somewear could not prepare the file upload (" + rootClassName(failure) + ")"
+            );
+        }
+        if (response == null) {
+            return error("FILE_UPLOAD_FAILED", "Somewear did not return a file upload ticket");
+        }
+        String uploadUrl = stringOrNull(invokeNoArgs(response, "getSignedUploadUrl"));
+        Object file = invokeNoArgs(response, "getFile");
+        String fileId = stringOrNull(tryInvokeNoArgs(file, "getId"));
+        if (uploadUrl == null || fileId == null) {
+            return error("MALFORMED_RESPONSE", "Somewear returned an incomplete file upload ticket");
+        }
+
+        Bundle result = ok("Somewear file upload ticket prepared");
+        result.putString("file_upload_url", uploadUrl);
+        result.putString("file_id", fileId);
+        result.putString("file_name", defaultText(tryInvokeNoArgs(file, "getName"), name));
+        result.putString(
+                "mime_type",
+                defaultText(tryInvokeNoArgs(file, "getMimeType"), mimeType)
+        );
+        result.putLong("workspace_id", workspaceId);
+        result.putLong(
+                "file_size_bytes",
+                numberOrDefault(tryInvokeNoArgs(file, "getFileSize"), fileSize)
+        );
+        putText(result, "file_user_id", tryInvokeNoArgs(file, "getUserId"));
+        result.putLong(
+                "file_created_at_ms",
+                protoTimestampMillis(tryInvokeNoArgs(file, "getCreatedTimestamp"))
+        );
+        result.putLong(
+                "file_uploaded_at_ms",
+                protoTimestampMillis(tryInvokeNoArgs(file, "getUploadedTimestamp"))
+        );
+        return result;
+    }
+
+    private static Bundle sendFileMetadata(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String messageId = requiredString(extras, "message_id");
+        String fileId = requiredString(extras, "file_id");
+        String fileName = requiredString(extras, "file_name");
+        String mimeType = extras.getString("mime_type", "application/octet-stream");
+        String fileUserId = extras.getString("file_user_id", "");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        long fileSize = extras.getLong("file_size_bytes", -1L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        if (fileSize < 0L) return error("INVALID_REQUEST", "file_size_bytes must be non-negative");
+        if (extras.containsKey("target_user_id")) {
+            return error("UNSUPPORTED", "target_user_id is not implemented in this gateway build");
+        }
+
+        final String channel;
+        String policy = extras.getString("route_policy", "RADIO_ONLY");
+        if ("RADIO_ONLY".equalsIgnoreCase(policy)) {
+            channel = "Radio";
+        } else if ("SATELLITE_ONLY".equalsIgnoreCase(policy)) {
+            channel = "Satellite";
+        } else if ("RADIO_THEN_SATELLITE".equalsIgnoreCase(policy)) {
+            return error(
+                    "UNSUPPORTED",
+                    "RADIO_THEN_SATELLITE is disabled until terminal delivery timeout fallback is implemented"
+            );
+        } else {
+            return error("INVALID_REQUEST", "Unknown route_policy: " + policy);
+        }
+
+        ensureCoreStarted();
+        ensurePayloadSubscription();
+        long now = System.currentTimeMillis();
+        long createdAt = extras.getLong("file_created_at_ms", now);
+        long uploadedAt = extras.getLong("file_uploaded_at_ms", now);
+        Object payload = buildFileMetadataPayload(
+                fileId,
+                fileName,
+                mimeType,
+                createdAt > 0L ? createdAt : now,
+                uploadedAt > 0L ? uploadedAt : now,
+                fileUserId,
+                fileSize,
+                workspaceId
+        );
+        if ("Radio".equals(channel) && approximateTransmissionCount(payload) != 1) {
+            return error(
+                    "PAYLOAD_TOO_LARGE_FOR_RADIO",
+                    "The file metadata is too large for one radio transmission; shorten the file name"
+            );
+        }
+
+        int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
+        synchronized (LOCK) {
+            DELIVERY_TRACKER.register(messageId, channel, Collections.singletonList(parcelId));
+            DELIVERY.put(
+                    messageId,
+                    deliveryBundle(messageId, "QUEUED", channel.toUpperCase(Locale.US), null, now)
+            );
+        }
+        try {
+            findMethod(router().getClass(), "send", 2).invoke(
+                    router(),
+                    payload,
+                    sendOptions(channel, extras.getLong("radio_timeout_ms", 30_000L))
+            );
+        } catch (Throwable failure) {
+            FragmentDeliveryTracker.Update failed = DELIVERY_TRACKER.fail(
+                    messageId,
+                    channel.toUpperCase(Locale.US),
+                    "Gateway could not queue the file metadata",
+                    System.currentTimeMillis()
+            );
+            if (failed != null) storeDeliveryUpdate(failed);
+            throwAsException(failure);
+        }
+
+        Bundle result = ok("File metadata accepted by SomewearRouter with channel " + channel);
+        result.putString("message_id", messageId);
+        result.putInt("parcel_id", parcelId);
+        result.putLong("accepted_at_ms", now);
+        result.putString("file_id", fileId);
+        result.putString("file_name", fileName);
+        result.putString("mime_type", mimeType);
+        result.putLong("file_size_bytes", fileSize);
+        return result;
+    }
+
+    private static Bundle pollIncomingFiles(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        ensureCoreStarted();
+        ensurePayloadSubscription();
+        long after = extras.getLong("after_sequence", 0L);
+        int limit = extras.getInt("limit", 100);
+        if (after < 0L || limit < 1 || limit > 500) {
+            return error("INVALID_REQUEST", "Invalid after_sequence or limit");
+        }
+        ArrayList<Bundle> items = new ArrayList<>();
+        synchronized (LOCK) {
+            for (Bundle item : INCOMING_FILES) {
+                if (item.getLong("sequence") > after) {
+                    items.add(new Bundle(item));
+                    if (items.size() >= limit) break;
+                }
+            }
+        }
+        Bundle result = ok("Incoming Somewear files");
+        result.putParcelableArrayList("items", items);
+        return result;
+    }
+
+    private static Bundle fileDownloadUrl(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String fileId = requiredString(extras, "file_id");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        ensureCoreStarted();
+        final Object uri;
+        try {
+            uri = invokeSuspend(
+                    fileRemoteSource(),
+                    "getFileDownloadUrl",
+                    DEFAULT_WORKSPACE_TIMEOUT_MS,
+                    fileId,
+                    Long.toString(workspaceId)
+            );
+        } catch (SuspendTimeoutException timeout) {
+            return error("TIMEOUT", "Timed out obtaining the Somewear file download ticket");
+        } catch (Throwable failure) {
+            return error(
+                    "FILE_DOWNLOAD_FAILED",
+                    "Somewear could not prepare the file download (" + rootClassName(failure) + ")"
+            );
+        }
+        String url = stringOrNull(uri);
+        if (url == null) {
+            return error("FILE_DOWNLOAD_FAILED", "Somewear did not return a file download ticket");
+        }
+        Bundle result = ok("Somewear file download ticket prepared");
+        result.putString("file_download_url", url);
         return result;
     }
 
@@ -1037,6 +1361,29 @@ public final class GatewayV2 {
         return result;
     }
 
+    /** Exercises native FileMetadataPayload parsing without using the network service. */
+    private static Bundle dispatchTestFileMetadata(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String fileId = requiredString(extras, "file_id");
+        String fileName = requiredString(extras, "file_name");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        long sourceUserId = extras.getLong("sender_id_long", 42L);
+        long now = System.currentTimeMillis();
+        Object payload = buildFileMetadataPayload(
+                fileId,
+                fileName,
+                extras.getString("mime_type", "image/jpeg"),
+                now,
+                now,
+                Long.toString(sourceUserId),
+                extras.getLong("file_size_bytes", 8_000_000L),
+                workspaceId
+        );
+        dispatchInboundTestPayload(payload, workspaceId, sourceUserId);
+        return ok("Test FileMetadataPayload dispatched");
+    }
+
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void dispatchInboundTestContent(
             String content,
@@ -1049,6 +1396,15 @@ public final class GatewayV2 {
         Object payload = messageClass
                 .getMethod("build", String.class, long.class)
                 .invoke(null, content, workspaceId);
+        dispatchInboundTestPayload(payload, workspaceId, sourceUserId);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void dispatchInboundTestPayload(
+            Object payload,
+            long workspaceId,
+            long sourceUserId
+    ) throws Exception {
         Object oldInfo = invokeNoArgs(payload, "getRoutingInfo");
         Class<?> channelClass = Class.forName(
                 "com.somewearlabs.somewearshared.core.api.DevicePayloadChannel"
@@ -1097,6 +1453,111 @@ public final class GatewayV2 {
         findMethod(device.getClass(), "toggleUsbConnect", 2)
                 .invoke(device, false, continuation);
         return ok("USB connection operation accepted");
+    }
+
+    private static Bundle nodeTelemetry() throws Exception {
+        ensureCoreStarted();
+        Object device = somewearDevice();
+        Object util = deviceUtil();
+        Bundle result = ok("Current Somewear Node telemetry");
+        result.putLong("sampled_at_ms", System.currentTimeMillis());
+
+        Object battery = flowValue(device, "getBattery");
+        if (battery instanceof Number) {
+            int value = ((Number) battery).intValue();
+            if (value >= 0 && value <= 100) result.putInt("battery_percent", value);
+        }
+        putText(result, "charge_status", flowValue(device, "getChargeStatus"));
+        putText(result, "power_status", flowValue(device, "getPowerStatus"));
+        putText(result, "activity_state", flowValue(device, "getActivityState"));
+
+        Object quality = flowValue(device, "getQuality");
+        Object rawQuality = tryInvokeNoArgs(quality, "getQuality");
+        if (rawQuality instanceof Number) {
+            int value = ((Number) rawQuality).intValue();
+            result.putInt("satellite_quality", value);
+            result.putBoolean("satellite_sendable", value >= 2);
+        }
+
+        putDisplayText(result, "firmware_version", flowValue(device, "getFirmwareVersion"));
+        putDisplayText(result, "network_version", flowValue(util, "getNetworkVersion"));
+        putText(result, "hardware_flavor", tryInvokeNoArgs(device, "getHardwareFlavor"));
+
+        Object identifiers = flowValue(device, "getIdentifiers");
+        putText(result, "serial_number", tryInvokeNoArgs(identifiers, "getSerial"));
+        putText(result, "imei", tryInvokeNoArgs(identifiers, "getImei"));
+        putBoolean(result, "gps_initial_fix", flowValue(device, "getGpsInitialFix"));
+        putText(result, "tracking_state", flowValue(device, "getTrackingState"));
+        putBoolean(result, "tracking_enabled", flowValue(device, "isTracking"));
+        Object bandwidthMultiplier = flowValue(device, "getLowBandwidthMultiplier");
+        if (bandwidthMultiplier instanceof Number
+                && ((Number) bandwidthMultiplier).intValue() > 0) {
+            result.putInt(
+                    "low_bandwidth_multiplier",
+                    ((Number) bandwidthMultiplier).intValue()
+            );
+        }
+        Object wakeDate = tryInvokeNoArgs(device, "getWakeDate");
+        if (wakeDate instanceof Date) {
+            long wakeAt = ((Date) wakeDate).getTime();
+            // This retained build sometimes constructs Date with epoch seconds.
+            if (wakeAt > 0L && wakeAt < 100_000_000_000L) wakeAt *= 1_000L;
+            if (wakeAt > 0L) result.putLong("wake_at_ms", wakeAt);
+        }
+        return result;
+    }
+
+    private static Bundle meshNetworkStatus() throws Exception {
+        ensureCoreStarted();
+        Bundle result = ok("Latest Somewear mesh-network update");
+        result.putLong("sampled_at_ms", System.currentTimeMillis());
+        Object update = flowValue(deviceUtil(), "getInboundMeshNetworkUpdate");
+        if (update == null) {
+            result.putBoolean("mesh_available", false);
+            return result;
+        }
+
+        Object rawPeer = tryInvokeNoArgs(update, "getUserAccountId");
+        Object rawRssi = tryInvokeNoArgs(update, "getSignalRssi");
+        int peer = rawPeer instanceof Number ? ((Number) rawPeer).intValue() : 0;
+        int rssi = rawRssi instanceof Number ? ((Number) rawRssi).intValue() : -1;
+        boolean available = peer > 0 && rssi != -1;
+        result.putBoolean("mesh_available", available);
+        if (peer > 0) result.putLong("mesh_peer_user_id", peer);
+        Object nextHop = tryInvokeNoArgs(update, "getNextHopUserAccountId");
+        if (nextHop instanceof Number && ((Number) nextHop).longValue() > 0L) {
+            result.putLong("mesh_next_hop_user_id", ((Number) nextHop).longValue());
+        }
+        Object hops = tryInvokeNoArgs(update, "getNumberOfHopsAway");
+        if (hops instanceof Number && available) {
+            result.putInt("mesh_hops", ((Number) hops).intValue());
+        }
+        if (rssi != -1) result.putInt("mesh_rssi", rssi);
+        putBoolean(result, "mesh_can_backhaul", tryInvokeNoArgs(update, "getCanBackhaulData"));
+        Object timestamp = tryInvokeNoArgs(update, "getTimestamp");
+        Object epochMillis = tryInvokeNoArgs(timestamp, "toEpochMilliseconds");
+        if (epochMillis instanceof Number) {
+            long value = ((Number) epochMillis).longValue();
+            if (value > 0L) result.putLong("mesh_updated_at_ms", value);
+        }
+        return result;
+    }
+
+    private static Bundle power(boolean turnOn) throws Exception {
+        ensureCoreStarted();
+        if (!deviceConnected()) {
+            return error("NOT_CONNECTED", "Connect the Somewear Node before changing power state");
+        }
+        try {
+            invokeSuspend(
+                    somewearDevice(),
+                    turnOn ? "powerOn" : "powerOff",
+                    DEFAULT_SETTINGS_TIMEOUT_MS
+            );
+        } catch (SuspendTimeoutException timeout) {
+            return error("TIMEOUT", "Timed out waiting for the Node power command");
+        }
+        return ok(turnOn ? "Node power-on requested" : "Node power-off requested");
     }
 
     /**
@@ -1497,6 +1958,39 @@ public final class GatewayV2 {
         if (value > 0) result.putInt(key, value);
     }
 
+    private static Object flowValue(Object owner, String getter) {
+        Object flow = tryInvokeNoArgs(owner, getter);
+        return tryInvokeNoArgs(flow, "getValue");
+    }
+
+    private static Object tryInvokeNoArgs(Object target, String name) {
+        if (target == null) return null;
+        try {
+            return invokeNoArgs(target, name);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void putNumber(Bundle result, String key, Object value) {
+        if (value instanceof Number) result.putInt(key, ((Number) value).intValue());
+    }
+
+    private static void putBoolean(Bundle result, String key, Object value) {
+        if (value instanceof Boolean) result.putBoolean(key, (Boolean) value);
+    }
+
+    private static void putText(Bundle result, String key, Object value) {
+        String text = stringOrNull(value);
+        if (text != null) result.putString(key, text);
+    }
+
+    private static void putDisplayText(Bundle result, String key, Object value) {
+        if (value == null) return;
+        Object display = tryInvokeNoArgs(value, "getDisplayString");
+        putText(result, key, display == null ? value : display);
+    }
+
     private static String externalPowerMode(String value) {
         if (value.endsWith("High")) return "HIGH";
         if (value.endsWith("Medium")) return "MEDIUM";
@@ -1521,6 +2015,7 @@ public final class GatewayV2 {
             DELIVERY_TRACKER.clear();
             RADIO_REASSEMBLER.clear();
             compositePackager = null;
+            fileRemoteSource = null;
         }
         if (subscription != null) {
             try {
@@ -1631,6 +2126,33 @@ public final class GatewayV2 {
                 return;
             }
 
+            if (payload.getClass().getName().endsWith(".FileMetadataPayload")) {
+                String fileId = String.valueOf(invokeNoArgs(payload, "getId"));
+                String fileName = String.valueOf(invokeNoArgs(payload, "getName"));
+                String mimeType = stringOrNull(invokeNoArgs(payload, "getMimeType"));
+                long fileSize = ((Number) invokeNoArgs(payload, "getFileSizeBytes")).longValue();
+                long workspaceId = ((Number) invokeNoArgs(payload, "getWorkspaceId")).longValue();
+                long sourceUserId = ((Number) invokeNoArgs(payload, "getSourceUserId")).longValue();
+                String ownerUserId = stringOrNull(invokeNoArgs(payload, "getUserId"));
+                Date createdAt = (Date) invokeNoArgs(payload, "getCreateTimestamp");
+                Date uploadedAt = (Date) invokeNoArgs(payload, "getUploadedTimestamp");
+                enqueueIncomingFile(
+                        traceId,
+                        fileId,
+                        fileName,
+                        mimeType,
+                        fileSize,
+                        workspaceId,
+                        String.valueOf(sourceUserId),
+                        ownerUserId,
+                        createdAt == null ? 0L : createdAt.getTime(),
+                        uploadedAt == null ? 0L : uploadedAt.getTime(),
+                        channel.toUpperCase(Locale.US),
+                        now
+                );
+                return;
+            }
+
             if (!payload.getClass().getName().endsWith(".MessagePayload")) {
                 synchronized (LOCK) {
                     ignoredInboundCount++;
@@ -1729,6 +2251,41 @@ public final class GatewayV2 {
         }
     }
 
+    private static void enqueueIncomingFile(
+            String messageId,
+            String fileId,
+            String fileName,
+            String mimeType,
+            long fileSize,
+            long workspaceId,
+            String senderId,
+            String ownerUserId,
+            long createdAt,
+            long uploadedAt,
+            String channel,
+            long receivedAt
+    ) {
+        synchronized (LOCK) {
+            Bundle item = new Bundle();
+            item.putLong("sequence", nextFileSequence++);
+            item.putString("message_id", messageId);
+            item.putString("file_id", fileId);
+            item.putString("file_name", fileName);
+            item.putString("mime_type", mimeType);
+            item.putLong("file_size_bytes", fileSize);
+            item.putLong("workspace_id", workspaceId);
+            item.putString("sender_id", senderId);
+            item.putString("file_user_id", ownerUserId);
+            item.putLong("file_created_at_ms", createdAt);
+            item.putLong("file_uploaded_at_ms", uploadedAt);
+            item.putLong("received_at_ms", receivedAt);
+            item.putString("delivered_channel", channel);
+            INCOMING_FILES.add(item);
+            lastInboundMessageAt = receivedAt;
+            while (INCOMING_FILES.size() > MAX_INCOMING_MESSAGES) INCOMING_FILES.remove(0);
+        }
+    }
+
     private static Bundle deliveryBundle(
             String messageId,
             String status,
@@ -1763,6 +2320,21 @@ public final class GatewayV2 {
         Class<?> type = Class.forName("com.somewearlabs.somewearcore.api.SomewearRouter");
         Object companion = type.getField("Companion").get(null);
         return invokeNoArgs(companion, "getInstance");
+    }
+
+    private static Object fileRemoteSource() throws Exception {
+        synchronized (LOCK) {
+            if (fileRemoteSource != null) return fileRemoteSource;
+            Class<?> uploadApiClass = Class.forName(
+                    "com.somewearlabs.somewearshared.api.FileUploadApi"
+            );
+            Object uploadApi = uploadApiClass.getConstructor().newInstance();
+            Class<?> remoteClass = Class.forName(
+                    "com.somewearlabs.somewearcore.filesharing.data.FileRemoteSourceImpl"
+            );
+            fileRemoteSource = remoteClass.getConstructor(uploadApiClass).newInstance(uploadApi);
+            return fileRemoteSource;
+        }
     }
 
     private static Object somewearDevice() throws Exception {
@@ -1884,6 +2456,23 @@ public final class GatewayV2 {
         if (value == null) return null;
         String text = String.valueOf(value).trim();
         return text.isEmpty() ? null : text;
+    }
+
+    private static String defaultText(Object value, String fallback) {
+        String text = stringOrNull(value);
+        return text == null ? fallback : text;
+    }
+
+    private static long numberOrDefault(Object value, long fallback) {
+        return value instanceof Number ? ((Number) value).longValue() : fallback;
+    }
+
+    private static long protoTimestampMillis(Object timestamp) {
+        Object seconds = tryInvokeNoArgs(timestamp, "getSeconds");
+        if (!(seconds instanceof Number)) return 0L;
+        long value = ((Number) seconds).longValue();
+        if (value <= 0L || value > Long.MAX_VALUE / 1_000L) return 0L;
+        return value * 1_000L;
     }
 
     private static Method findMethod(Class<?> type, String name, int parameterCount)

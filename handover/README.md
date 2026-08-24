@@ -178,6 +178,19 @@ button, and Bluetooth/USB connection mode. See
 `factoryReset(FactoryResetConfirmation.ERASE_NODE)` as destructive: it clears
 the Node and stored local bond/device and normally disconnects immediately.
 
+`nodeTelemetry()` exposes the retained 0..5 satellite-quality value (sendable
+at 2 or above), battery/firmware/tracking state, and other non-secret Node
+health. `meshNetworkStatus()` exposes the latest mesh peer/next-hop/hops/RSSI
+snapshot. These reads do not select a transport. SC3 must still use an explicit
+`RoutePolicy` for every send.
+
+For images/documents, call `sendFile(FileSendRequest)` with an Android content
+URI. The SDK streams the file to a Somewear signed upload URL, then sends only
+native file metadata through Radio or Satellite. The receiver collects
+`incomingFiles()` and calls `downloadFile()`. Both sides need data access for
+file bytes; the Node channel carries the announcement, not a multi-megabyte
+image. See `somewear-gateway-sdk/README.md#files-and-images`.
+
 On a fresh install, `listWorkspaces()` can correctly return an empty cache. Register the SDK scanner and submit the result to the new enrollment API:
 
 ```kotlin
@@ -223,6 +236,8 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | Connection observer repeatedly fires and connection logic disconnects/restarts | SC3 is using an older AAR, or the collector calls connect/disconnect for each value. | Update the AAR and all five gateway splits. Collect `observeDeviceConnection()` only for state changes and start a connection only from an explicit user/state-machine transition. |
 | Hardware setter returns `NOT_CONNECTED` | Settings are written through the connected Node and no Bluetooth/USB Node is currently connected. | Wait for an observed connected state, then submit one setting operation and handle its acknowledgement/timeout. |
 | Hardware call returns `UNSUPPORTED` or is missing at runtime | The AAR and installed base APK are from different handover revisions. | Pull one repository revision, run the verifier, then re-sign/reinstall all five splits and rebuild SC3 with that revision's AAR. |
+| File call returns `FILE_READ_FAILED` | SC3 lost URI permission or the picker URI cannot be reopened. | Retain URI permission when applicable and keep the URI readable until `sendFile()` completes. |
+| File call returns `FILE_UPLOAD_FAILED` or `FILE_DOWNLOAD_FAILED` | The signed-ticket request, data connection, HTTP transfer, or destination URI failed. | Confirm Somewear authentication/workspace membership, phone data access, and URI access; retry under application policy. |
 | Connected but no incoming messages and no error | An older gateway had no receive-lifetime service and swallowed router callback exceptions, or SC3 is not collecting `incomingMessages()`. | Update both AAR and all five gateway splits. Start the Flow before peer transmission and inspect `receiveHealth()`: zero callbacks points to Node/workspace/radio delivery; ignored callbacks indicate a non-`MessagePayload`; queued messages point to an SC3 cursor/UI issue. |
 | Small text works but larger JSON changes to Satellite or returns `ChannelDisabled` | The installed gateway predates v11 and allowed the retained Somewear composite path to rewrite split parts to Satellite. | Update the AAR and re-sign/reinstall all five prepared v12 gateway splits on both devices. Confirm `info().capabilities` contains `radio_fragmentation`. |
 | Sender reports every fragment delivered over Radio, but the receiver exposes only the first two and reports no SDK error | Gateway v11 used the same whole-second timestamp for every `MessagePayload`, so the retained receiver discarded fragment three onward as duplicates. | Install/re-sign the prepared v12 split set on both devices and confirm `info().capabilities` contains `radio_fragment_dedup`. Do not substitute Raw/DataPayload; this retained router removes Radio from Raw traffic. |
@@ -230,5 +245,8 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 ## Operational limitations
 
 - Physical radio/satellite delivery and successful live hardware-setting/reset acknowledgements still require provisioned Somewear hardware and compatible workspace/traffic keys.
+- File/image upload and download require the authenticated Somewear service and
+  phone data access. Only the small metadata announcement uses the selected Node
+  channel; this build does not send multi-megabyte file bytes over mesh radio.
 - `RADIO_THEN_SATELLITE` remains unsupported. QR enrollment, workspace synchronization, and cache selection are exposed, but a real issued invite, key transfer, and peer delivery still require account/hardware acceptance testing.
 - The gateway artifacts contain vendor-derived code. Keep the repository and downstream artifacts access-controlled and obtain the required Somewear licensing/approval before deployment or redistribution.

@@ -1,5 +1,6 @@
 package com.sc3.somewear.sdk
 
+import android.net.Uri
 import java.util.UUID
 
 public sealed interface SomewearResult<out T> {
@@ -36,6 +37,9 @@ public enum class SomewearErrorCode {
     ENVIRONMENT_MISMATCH,
     JOIN_FAILED,
     RECEIVE_FAILED,
+    FILE_READ_FAILED,
+    FILE_UPLOAD_FAILED,
+    FILE_DOWNLOAD_FAILED,
     PAYLOAD_TOO_LARGE_FOR_RADIO,
     MALFORMED_RESPONSE,
     INTERNAL,
@@ -78,6 +82,41 @@ public data class DeviceStatus(
     val operationState: OperationState,
     val operationResult: String?,
     val localTransport: LocalTransport,
+)
+
+/** A stable snapshot of non-secret Node state exposed by the retained Somewear core. */
+public data class NodeTelemetry(
+    val batteryPercent: Int?,
+    val chargeStatus: String?,
+    val powerStatus: String?,
+    val activityState: String?,
+    /** Somewear satellite quality from 0 (none) to 5 (best). */
+    val satelliteQuality: Int?,
+    /** The retained core considers quality >= 2 sendable. */
+    val satelliteSendable: Boolean?,
+    val firmwareVersion: String?,
+    val networkVersion: String?,
+    val hardwareFlavor: String?,
+    val serialNumber: String?,
+    val imei: String?,
+    val gpsInitialFix: Boolean?,
+    val trackingState: String?,
+    val trackingEnabled: Boolean?,
+    val lowBandwidthMultiplier: Int?,
+    val wakeAtEpochMillis: Long?,
+    val sampledAtEpochMillis: Long,
+)
+
+/** The latest neighbour/topology report received from the Node's mesh radio. */
+public data class MeshNetworkStatus(
+    val available: Boolean,
+    val peerUserId: Long?,
+    val nextHopUserId: Long?,
+    val hopsAway: Int?,
+    val signalRssi: Int?,
+    val canBackhaulData: Boolean?,
+    val updatedAtEpochMillis: Long?,
+    val sampledAtEpochMillis: Long,
 )
 
 public enum class NodeConnectionMode(public val wireValue: String) {
@@ -220,6 +259,58 @@ public data class IncomingMessage(
     val senderId: String?,
     val receivedAtEpochMillis: Long,
     val channel: DeviceChannel,
+)
+
+/** A local URI selected by SC3 and the route used for its small metadata announcement. */
+public data class FileSendRequest(
+    val workspaceId: Long,
+    val sourceUri: Uri,
+    val fileName: String? = null,
+    val mimeType: String? = null,
+    val routePolicy: RoutePolicy = RoutePolicy.RADIO_ONLY,
+    val messageId: String = UUID.randomUUID().toString(),
+    val radioTimeoutMillis: Long = 30_000L,
+) {
+    init {
+        require(workspaceId > 0L) { "workspaceId must be positive" }
+        require(sourceUri.toString().isNotBlank()) { "sourceUri must not be empty" }
+        require(fileName == null || fileName.isNotBlank()) { "fileName must not be blank" }
+        require(mimeType == null || mimeType.isNotBlank()) { "mimeType must not be blank" }
+        require(messageId.isNotBlank()) { "messageId must not be blank" }
+        require(radioTimeoutMillis > 0L) { "radioTimeoutMillis must be positive" }
+    }
+}
+
+public data class FileSendReceipt(
+    val fileId: String,
+    val fileName: String,
+    val mimeType: String?,
+    val sizeBytes: Long,
+    val sha256: String,
+    /** Delivery applies to the FileMetadata announcement, not the already-uploaded bytes. */
+    val metadataDelivery: SendReceipt,
+)
+
+public data class IncomingFile(
+    val sequence: Long,
+    val messageId: String,
+    val fileId: String,
+    val fileName: String,
+    val mimeType: String?,
+    val sizeBytes: Long,
+    val workspaceId: Long,
+    val senderId: String?,
+    val fileOwnerUserId: String?,
+    val createdAtEpochMillis: Long?,
+    val uploadedAtEpochMillis: Long?,
+    val receivedAtEpochMillis: Long,
+    val channel: DeviceChannel,
+)
+
+public data class FileDownloadReceipt(
+    val fileId: String,
+    val destinationUri: Uri,
+    val bytesWritten: Long,
 )
 
 /** Safe receive-pipeline telemetry. It never contains payload or workspace secrets. */

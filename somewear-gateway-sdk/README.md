@@ -20,11 +20,15 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v12 implements standalone initialization, a state-change-only connection observer, Node hardware settings, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, radio-safe JSON fragmentation/reassembly, duplicate-filter-safe fragment timestamps, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v12 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, radio-safe JSON fragmentation/reassembly, duplicate-filter-safe fragment timestamps, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
 The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. That method lets Somewear Core use its default Radio + Satellite + Cellular channel set and is not safe when satellite cost must be controlled.
+
+See [`FILE_API_TEST_REPORT.md`](FILE_API_TEST_REPORT.md) for the exact file,
+telemetry, and two-emulator regression evidence and the remaining physical/cloud
+acceptance boundary.
 
 ## Requirements
 
@@ -36,7 +40,8 @@ The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. 
 - SC3 and the gateway signed with the same certificate.
 - Camera permission granted to the separately installed gateway. SC3 itself does
   not need CameraX, ML Kit, or a Camera permission for workspace scanning.
-- Internet access while accepting a service-token invite or synchronizing workspaces.
+- Internet access while accepting a service-token invite, synchronizing workspaces,
+  uploading a file, or downloading a received file.
 - A provisioned Somewear Node and compatible Somewear workspace/mesh keys.
 - For Bluetooth: Android Bluetooth permissions and a bonded Somewear Node.
 - For USB: Android USB-host/OTG support, a data cable, and a Node model that supports USB.
@@ -238,6 +243,40 @@ somewear.cancelConnection()
 somewear.disconnect()
 ```
 
+### Node telemetry, satellite signal, and mesh status
+
+Read one snapshot or collect changes:
+
+```kotlin
+val telemetry = somewear.nodeTelemetry()
+val mesh = somewear.meshNetworkStatus()
+
+lifecycleScope.launch {
+    somewear.observeNodeTelemetry().collect(::renderTelemetry)
+}
+
+lifecycleScope.launch {
+    somewear.observeMeshNetworkStatus().collect(::renderMeshStatus)
+}
+```
+
+`NodeTelemetry.satelliteQuality` is the retained Somewear value from 0 to 5;
+5 is best, and `satelliteSendable` becomes true at 2 or above. Signal quality
+does not select a route. SC3 still chooses `RADIO_ONLY` or `SATELLITE_ONLY` on
+each send. Battery, identity, firmware, tracking, GPS, and power fields are
+nullable when the core has not received a valid value from the Node.
+
+`MeshNetworkStatus` reports the latest peer, next hop, hop count, RSSI, and
+backhaul flag. `available=false` means the core currently has only its empty
+mesh snapshot; do not treat its timestamp as evidence that a peer is reachable.
+
+Power commands require a connected Node:
+
+```kotlin
+somewear.powerOn()
+somewear.powerOff()
+```
+
 ### Hardware settings
 
 Read the most recently reported Node settings:
@@ -380,6 +419,13 @@ Read once:
 val result = somewear.deliveryStatus(messageId)
 ```
 
+Cancel all active Somewear parcels belonging to an SC3 message, including all
+parts of a fragmented radio message:
+
+```kotlin
+somewear.cancelMessage(messageId)
+```
+
 Observe until terminal:
 
 ```kotlin
@@ -439,6 +485,72 @@ when (val health = somewear.receiveHealth()) {
 - `errorCount>0`: inspect `lastError`, which contains only a stage and exception
   class, never payload data.
 - `queuedIncomingCount>0` while SC3 shows nothing: fix SC3's Flow/cursor/UI path.
+
+### Files and images
+
+Use `sendFile()` for images, documents, audio, or other files. Give it a
+caller-readable `content://` URI from Android's photo picker or document picker:
+
+```kotlin
+val result = somewear.sendFile(
+    FileSendRequest(
+        workspaceId = workspaceId,
+        sourceUri = selectedImageUri,
+        fileName = "recon-01.jpg",       // optional; inferred when omitted
+        mimeType = "image/jpeg",         // optional; inferred when omitted
+        routePolicy = RoutePolicy.RADIO_ONLY,
+    ),
+)
+
+when (result) {
+    is SomewearResult.Success -> {
+        val fileId = result.value.fileId
+        val metadataMessageId = result.value.metadataDelivery.messageId
+    }
+    is SomewearResult.Failure -> showError(result.error)
+}
+```
+
+The SDK hashes and counts the URI, obtains an authenticated signed upload ticket
+from Somewear, streams the bytes directly to that URL, and then sends a native
+`FileMetadataPayload` through the selected Node channel. File bytes never enter
+an Android IPC `Bundle`, so large images do not hit Binder's transaction limit.
+The upload URL is private to the SDK/gateway exchange and is not returned to SC3.
+
+Important transport distinction: Radio or Satellite carries the small file
+announcement, not the image bytes. The sender needs data access to upload before
+sending; the receiver needs data access to download. This is the file workflow
+present in the retained Somewear core. It is not peer-to-peer multi-megabyte
+image transfer over the mesh radio. For small JSON sent directly over radio,
+the existing bounded message limit remains 64 KiB.
+
+Receive file announcements using a cursor just like messages:
+
+```kotlin
+lifecycleScope.launch {
+    somewear.incomingFiles(afterSequence = lastFileSequence).collect { file ->
+        persistFileMetadata(file)
+        // Download only after operator/policy approval.
+    }
+}
+
+val page = somewear.pollIncomingFiles(afterSequence = lastFileSequence, limit = 50)
+```
+
+Download into a URI that SC3 can write:
+
+```kotlin
+when (val downloaded = somewear.downloadFile(incomingFile, destinationUri)) {
+    is SomewearResult.Success -> verifySize(downloaded.value.bytesWritten)
+    is SomewearResult.Failure -> showError(downloaded.error)
+}
+```
+
+`FileSendReceipt.metadataDelivery` is queue acceptance for the small
+announcement. Continue with `deliveryStatus()` or `observeDeliveryStatus()` to
+confirm its terminal channel/status. A successful upload alone does not prove
+that the peer received the announcement. Failed announcement sends can leave an
+uploaded but unannounced file in the Somewear service.
 
 ### Workspace and mesh-key readiness
 
@@ -584,6 +696,12 @@ USB-specific errors are represented separately:
 - `USB_OPEN_PORT_FAILED`
 - `USB_INCORRECT_DEVICE`
 
+File-specific errors are:
+
+- `FILE_READ_FAILED`: SC3's URI permission expired or the source cannot be reopened.
+- `FILE_UPLOAD_FAILED`: the upload ticket or signed-URL PUT failed.
+- `FILE_DOWNLOAD_FAILED`: the download ticket, GET, or destination URI failed.
+
 ## Low-level gateway IPC contract
 
 Authority:
@@ -615,6 +733,8 @@ Every method returns a `Bundle` with:
 | `connectBle` | `address: String` | accepted operation |
 | `connectUsb` | none | accepted operation or USB error |
 | `getDeviceStatus` | none | `connection_state`, `operation_state`, `operation_result`, `local_transport` |
+| `getNodeTelemetry` | none | battery, charge/power/activity, satellite quality/sendable, firmware/identity/GPS/tracking fields |
+| `getMeshNetworkStatus` | none | mesh availability, peer/next-hop, hops, RSSI, backhaul, timestamps |
 | `cancelConnection` | none | common result |
 | `setConnectionMode` | `connection_mode: BLUETOOTH or USB` | accepted setting command |
 | `getHardwareSettings` | none | nullable tracking, network, radio, feedback, button, and connection-mode fields |
@@ -632,9 +752,15 @@ Every method returns a `Bundle` with:
 | `factoryReset` | `factory_reset_confirmation: ERASE_NODE` | destructive reset result |
 | `disconnect` | none | common result |
 | `shutdown` | none | common result |
+| `powerOn` / `powerOff` | none | accepted connected-Node power command |
 | `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `radio_fragmented`, `accepted_at_ms` |
+| `cancelMessage` | `message_id` | canceled fragment count |
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
+| `prepareFileUpload` | name, MIME, SHA-256, byte count, workspace | internal signed-upload ticket and file metadata |
+| `sendFileMetadata` | prepared file metadata, message ID, workspace, route policy | parcel/message/file acceptance fields |
+| `pollIncomingFiles` | `after_sequence`, `limit` | file-metadata `items: ArrayList<Bundle>` |
+| `getFileDownloadUrl` | `file_id`, `workspace_id` | internal signed-download ticket |
 | `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, queue, and last-event counters |
 | `joinWorkspace` | `invite_code`, optional `workspace_timeout_ms` | joined workspace fields, `workspace_sync_completed` |
 | `syncWorkspaces` | optional `workspace_timeout_ms` | `workspaces: ArrayList<Bundle>` |
@@ -657,6 +783,10 @@ received_at_ms: Long
 delivered_channel: String
 ```
 
+The signed upload/download methods are internal implementation details of the
+typed SDK. Applications should call `sendFile()` and `downloadFile()` so URLs
+are not logged, persisted, or exposed to UI code.
+
 ## Gateway compatibility
 
 | Capability | Gateway v12 | Validation/work remaining |
@@ -672,6 +802,11 @@ delivered_channel: String
 | Oversized JSON over Radio without Satellite | Yes | Unit tested; two Android runtimes queued eight distinct-timestamp Radio fragments for 932 bytes, normal/reverse-order reassembly passed, 60,000 bytes produced 469 fragments without a core crash, and restart persistence passed; post-fix physical peer-radio acceptance remains |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
 | Delivery status and actual channel | Yes | Multi-fragment aggregation unit tested; live Node terminal acknowledgements require hardware validation |
+| Message cancellation | Yes | Fragment cancellation aggregation unit tested; live Node cancellation acknowledgement requires hardware validation |
+| Node telemetry and satellite quality | Yes | Two Android runtimes returned stable disconnected snapshots without core crashes; connected values require hardware validation |
+| Mesh-network snapshot | Yes | Empty-state Android validation passed; live peer RSSI/topology requires hardware validation |
+| File/image metadata receive | Yes | Native 25 MB and 50 MB image metadata records parsed and polled as Radio on two Android runtimes without transferring bytes through Binder |
+| File/image upload and download | Yes | SDK/gateway build and signed-ticket paths implemented; live authenticated Somewear service upload/download remains account acceptance testing |
 | Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
 | QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |

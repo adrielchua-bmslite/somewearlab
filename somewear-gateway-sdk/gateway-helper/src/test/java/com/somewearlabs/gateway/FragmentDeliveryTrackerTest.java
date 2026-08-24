@@ -75,4 +75,19 @@ public class FragmentDeliveryTrackerTest {
         FragmentDeliveryTracker tracker = new FragmentDeliveryTracker();
         assertNull(tracker.update(404, "Error", "Satellite", "Unknown", 1L));
     }
+
+    @Test
+    public void cancellationReturnsEveryParcelAndBecomesTerminal() {
+        FragmentDeliveryTracker tracker = new FragmentDeliveryTracker();
+        tracker.register("message", "Radio", Arrays.asList(40, 41, 42));
+
+        FragmentDeliveryTracker.Cancellation cancellation = tracker.cancel("message", 8L);
+
+        assertNotNull(cancellation);
+        assertEquals(Arrays.asList(40, 41, 42), cancellation.parcelIds);
+        assertEquals("CANCELED", cancellation.update.status);
+        assertEquals(3, cancellation.update.fragmentCount);
+        assertNull(tracker.update(40, "Delivered", "Radio", null, 9L));
+        assertNull(tracker.cancel("message", 10L));
+    }
 }

@@ -96,6 +96,24 @@ final class FragmentDeliveryTracker {
         return update;
     }
 
+    synchronized Cancellation cancel(String messageId, long updatedAt) {
+        Transfer transfer = transfersByMessage.get(messageId);
+        if (transfer == null) return null;
+        transfer.terminal = true;
+        List<Integer> parcelIds = new ArrayList<>();
+        for (Part part : transfer.parts) parcelIds.add(part.parcelId);
+        Update update = new Update(
+                messageId,
+                "CANCELED",
+                transfer.channel,
+                "Canceled by SC3",
+                updatedAt,
+                transfer.expectedCount
+        );
+        removeTransfer(messageId);
+        return new Cancellation(parcelIds, update);
+    }
+
     synchronized void clear() {
         partsByParcel.clear();
         transfersByMessage.clear();
@@ -215,6 +233,16 @@ final class FragmentDeliveryTracker {
             this.errorReason = errorReason;
             this.updatedAt = updatedAt;
             this.fragmentCount = fragmentCount;
+        }
+    }
+
+    static final class Cancellation {
+        final List<Integer> parcelIds;
+        final Update update;
+
+        Cancellation(List<Integer> parcelIds, Update update) {
+            this.parcelIds = parcelIds;
+            this.update = update;
         }
     }
 }

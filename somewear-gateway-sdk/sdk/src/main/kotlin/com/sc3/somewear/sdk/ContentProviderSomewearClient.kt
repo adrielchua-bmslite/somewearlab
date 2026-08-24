@@ -107,6 +107,28 @@ internal class ContentProviderSomewearClient(
     override suspend fun deviceStatus(): SomewearResult<DeviceStatus> =
         call(SomewearGatewayContract.Method.GET_DEVICE_STATUS).map(::parseDeviceStatus)
 
+    override suspend fun nodeTelemetry(): SomewearResult<NodeTelemetry> =
+        call(SomewearGatewayContract.Method.GET_NODE_TELEMETRY).map(::parseNodeTelemetry)
+
+    override fun observeNodeTelemetry(): Flow<SomewearResult<NodeTelemetry>> =
+        flow {
+            while (currentCoroutineContext().isActive) {
+                emit(nodeTelemetry())
+                delay(config.pollIntervalMillis)
+            }
+        }.distinctUntilChanged(::sameNodeTelemetryObservation)
+
+    override suspend fun meshNetworkStatus(): SomewearResult<MeshNetworkStatus> =
+        call(SomewearGatewayContract.Method.GET_MESH_NETWORK_STATUS).map(::parseMeshNetworkStatus)
+
+    override fun observeMeshNetworkStatus(): Flow<SomewearResult<MeshNetworkStatus>> =
+        flow {
+            while (currentCoroutineContext().isActive) {
+                emit(meshNetworkStatus())
+                delay(config.pollIntervalMillis)
+            }
+        }.distinctUntilChanged(::sameMeshNetworkObservation)
+
     override fun observeDeviceConnection(): Flow<SomewearResult<DeviceStatus>> =
         flow {
             while (currentCoroutineContext().isActive) {
@@ -123,6 +145,12 @@ internal class ContentProviderSomewearClient(
 
     override suspend fun shutdown(): SomewearResult<Unit> =
         call(SomewearGatewayContract.Method.SHUTDOWN).unit()
+
+    override suspend fun powerOn(): SomewearResult<Unit> =
+        call(SomewearGatewayContract.Method.POWER_ON).unit()
+
+    override suspend fun powerOff(): SomewearResult<Unit> =
+        call(SomewearGatewayContract.Method.POWER_OFF).unit()
 
     override suspend fun hardwareSettings(): SomewearResult<HardwareSettings> =
         call(SomewearGatewayContract.Method.GET_HARDWARE_SETTINGS).map(::parseHardwareSettings)
@@ -275,6 +303,16 @@ internal class ContentProviderSomewearClient(
         ).map { parseDeliveryUpdate(it, messageId) }
     }
 
+    override suspend fun cancelMessage(messageId: String): SomewearResult<Unit> {
+        if (messageId.isBlank()) {
+            return invalid(SomewearGatewayContract.Method.CANCEL_MESSAGE, "messageId must not be blank")
+        }
+        return call(
+            SomewearGatewayContract.Method.CANCEL_MESSAGE,
+            Bundle().apply { putString(SomewearGatewayContract.Key.MESSAGE_ID, messageId) },
+        ).unit()
+    }
+
     override fun observeDeliveryStatus(messageId: String): Flow<DeliveryUpdate> = flow {
         while (currentCoroutineContext().isActive) {
             when (val result = deliveryStatus(messageId)) {
@@ -320,6 +358,180 @@ internal class ContentProviderSomewearClient(
                 is SomewearResult.Failure -> throw SomewearSdkException(result.error)
             }
             delay(config.pollIntervalMillis)
+        }
+    }
+
+    override suspend fun sendFile(request: FileSendRequest): SomewearResult<FileSendReceipt> =
+        withContext(Dispatchers.IO) {
+            val local = try {
+                inspectLocalFile(
+                    resolver,
+                    request.sourceUri,
+                    request.fileName,
+                    request.mimeType,
+                )
+            } catch (exception: Exception) {
+                return@withContext SomewearResult.Failure(
+                    SomewearError(
+                        SomewearErrorCode.FILE_READ_FAILED,
+                        exception.message ?: "Could not read the source file",
+                        SomewearGatewayContract.Method.PREPARE_FILE_UPLOAD,
+                        exception,
+                    ),
+                )
+            }
+
+            val prepared = call(
+                SomewearGatewayContract.Method.PREPARE_FILE_UPLOAD,
+                Bundle().apply {
+                    putLong(SomewearGatewayContract.Key.WORKSPACE_ID, request.workspaceId)
+                    putString(SomewearGatewayContract.Key.FILE_NAME, local.name)
+                    local.mimeType?.let { putString(SomewearGatewayContract.Key.MIME_TYPE, it) }
+                    putLong(SomewearGatewayContract.Key.FILE_SIZE_BYTES, local.sizeBytes)
+                    putString(SomewearGatewayContract.Key.FILE_SHA256, local.sha256)
+                },
+            )
+            if (prepared is SomewearResult.Failure) return@withContext prepared
+            prepared as SomewearResult.Success
+            val ticket = prepared.value
+            val uploadUrl = ticket.getString(SomewearGatewayContract.Key.FILE_UPLOAD_URL)
+                ?: return@withContext malformed(
+                    SomewearGatewayContract.Method.PREPARE_FILE_UPLOAD,
+                    "Gateway omitted the file upload ticket",
+                )
+
+            try {
+                uploadLocalFile(
+                    resolver,
+                    request.sourceUri,
+                    uploadUrl,
+                    local.mimeType,
+                    local.sizeBytes,
+                )
+            } catch (exception: Exception) {
+                return@withContext SomewearResult.Failure(
+                    SomewearError(
+                        SomewearErrorCode.FILE_UPLOAD_FAILED,
+                        exception.message ?: "Could not upload the file",
+                        SomewearGatewayContract.Method.PREPARE_FILE_UPLOAD,
+                        exception,
+                    ),
+                )
+            }
+
+            val sent = call(
+                SomewearGatewayContract.Method.SEND_FILE_METADATA,
+                Bundle(ticket).apply {
+                    remove(SomewearGatewayContract.Key.FILE_UPLOAD_URL)
+                    putString(SomewearGatewayContract.Key.MESSAGE_ID, request.messageId)
+                    putLong(SomewearGatewayContract.Key.WORKSPACE_ID, request.workspaceId)
+                    putString(SomewearGatewayContract.Key.ROUTE_POLICY, request.routePolicy.wireValue)
+                    putLong(SomewearGatewayContract.Key.RADIO_TIMEOUT_MS, request.radioTimeoutMillis)
+                },
+            )
+            if (sent is SomewearResult.Failure) return@withContext sent
+            sent as SomewearResult.Success
+            val result = sent.value
+            val fileId = result.getString(SomewearGatewayContract.Key.FILE_ID)
+                ?: ticket.getString(SomewearGatewayContract.Key.FILE_ID)
+                ?: return@withContext malformed(
+                    SomewearGatewayContract.Method.SEND_FILE_METADATA,
+                    "Gateway omitted file_id",
+                )
+            SomewearResult.Success(
+                FileSendReceipt(
+                    fileId = fileId,
+                    fileName = result.getString(SomewearGatewayContract.Key.FILE_NAME) ?: local.name,
+                    mimeType = result.getString(SomewearGatewayContract.Key.MIME_TYPE)
+                        ?: local.mimeType,
+                    sizeBytes = result.getLong(
+                        SomewearGatewayContract.Key.FILE_SIZE_BYTES,
+                        local.sizeBytes,
+                    ),
+                    sha256 = local.sha256,
+                    metadataDelivery = SendReceipt(
+                        messageId = result.getString(SomewearGatewayContract.Key.MESSAGE_ID)
+                            ?: request.messageId,
+                        parcelId = result.optionalInt(SomewearGatewayContract.Key.PARCEL_ID),
+                        acceptedAtEpochMillis = result.getLong(
+                            SomewearGatewayContract.Key.ACCEPTED_AT_MS,
+                            System.currentTimeMillis(),
+                        ),
+                    ),
+                ),
+            )
+        }
+
+    override suspend fun pollIncomingFiles(
+        afterSequence: Long,
+        limit: Int,
+    ): SomewearResult<List<IncomingFile>> {
+        if (afterSequence < 0L || limit !in 1..500) {
+            return invalid(
+                SomewearGatewayContract.Method.POLL_INCOMING_FILES,
+                "afterSequence must be non-negative and limit must be between 1 and 500",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.POLL_INCOMING_FILES,
+            Bundle().apply {
+                putLong(SomewearGatewayContract.Key.AFTER_SEQUENCE, afterSequence)
+                putInt(SomewearGatewayContract.Key.LIMIT, limit)
+            },
+        ).map { bundle ->
+            bundle.bundleList(SomewearGatewayContract.Key.ITEMS).map(::parseIncomingFile)
+        }
+    }
+
+    override fun incomingFiles(afterSequence: Long): Flow<IncomingFile> = flow {
+        var cursor = afterSequence
+        while (currentCoroutineContext().isActive) {
+            when (val result = pollIncomingFiles(cursor)) {
+                is SomewearResult.Success -> result.value.forEach { file ->
+                    emit(file)
+                    cursor = maxOf(cursor, file.sequence)
+                }
+                is SomewearResult.Failure -> throw SomewearSdkException(result.error)
+            }
+            delay(config.pollIntervalMillis)
+        }
+    }
+
+    override suspend fun downloadFile(
+        file: IncomingFile,
+        destinationUri: Uri,
+    ): SomewearResult<FileDownloadReceipt> = withContext(Dispatchers.IO) {
+        val ticket = call(
+            SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+            Bundle().apply {
+                putString(SomewearGatewayContract.Key.FILE_ID, file.fileId)
+                putLong(SomewearGatewayContract.Key.WORKSPACE_ID, file.workspaceId)
+            },
+        )
+        if (ticket is SomewearResult.Failure) return@withContext ticket
+        ticket as SomewearResult.Success
+        val downloadUrl = ticket.value.getString(SomewearGatewayContract.Key.FILE_DOWNLOAD_URL)
+            ?: return@withContext malformed(
+                SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                "Gateway omitted the file download ticket",
+            )
+        try {
+            SomewearResult.Success(
+                FileDownloadReceipt(
+                    fileId = file.fileId,
+                    destinationUri = destinationUri,
+                    bytesWritten = downloadToLocalFile(resolver, downloadUrl, destinationUri),
+                ),
+            )
+        } catch (exception: Exception) {
+            SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.FILE_DOWNLOAD_FAILED,
+                    exception.message ?: "Could not download the file",
+                    SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                    exception,
+                ),
+            )
         }
     }
 
@@ -723,6 +935,53 @@ internal class ContentProviderSomewearClient(
         ),
     )
 
+    private fun parseNodeTelemetry(bundle: Bundle): NodeTelemetry = NodeTelemetry(
+        batteryPercent = bundle.optionalInt(SomewearGatewayContract.Key.BATTERY_PERCENT),
+        chargeStatus = bundle.getString(SomewearGatewayContract.Key.CHARGE_STATUS),
+        powerStatus = bundle.getString(SomewearGatewayContract.Key.POWER_STATUS),
+        activityState = bundle.getString(SomewearGatewayContract.Key.ACTIVITY_STATE),
+        satelliteQuality = bundle.optionalInt(SomewearGatewayContract.Key.SATELLITE_QUALITY),
+        satelliteSendable = bundle.optionalBoolean(
+            SomewearGatewayContract.Key.SATELLITE_SENDABLE,
+        ),
+        firmwareVersion = bundle.getString(SomewearGatewayContract.Key.FIRMWARE_VERSION),
+        networkVersion = bundle.getString(SomewearGatewayContract.Key.NETWORK_VERSION),
+        hardwareFlavor = bundle.getString(SomewearGatewayContract.Key.HARDWARE_FLAVOR),
+        serialNumber = bundle.getString(SomewearGatewayContract.Key.SERIAL_NUMBER),
+        imei = bundle.getString(SomewearGatewayContract.Key.IMEI),
+        gpsInitialFix = bundle.optionalBoolean(SomewearGatewayContract.Key.GPS_INITIAL_FIX),
+        trackingState = bundle.getString(SomewearGatewayContract.Key.TRACKING_STATE),
+        trackingEnabled = bundle.optionalBoolean(SomewearGatewayContract.Key.TRACKING_ENABLED),
+        lowBandwidthMultiplier = bundle.optionalInt(
+            SomewearGatewayContract.Key.LOW_BANDWIDTH_MULTIPLIER,
+        ),
+        wakeAtEpochMillis = bundle.positiveLongOrNull(SomewearGatewayContract.Key.WAKE_AT_MS),
+        sampledAtEpochMillis = bundle.getLong(
+            SomewearGatewayContract.Key.SAMPLED_AT_MS,
+            System.currentTimeMillis(),
+        ),
+    )
+
+    private fun parseMeshNetworkStatus(bundle: Bundle): MeshNetworkStatus = MeshNetworkStatus(
+        available = bundle.getBoolean(SomewearGatewayContract.Key.MESH_AVAILABLE, false),
+        peerUserId = bundle.positiveLongOrNull(SomewearGatewayContract.Key.MESH_PEER_USER_ID),
+        nextHopUserId = bundle.positiveLongOrNull(
+            SomewearGatewayContract.Key.MESH_NEXT_HOP_USER_ID,
+        ),
+        hopsAway = bundle.optionalInt(SomewearGatewayContract.Key.MESH_HOPS),
+        signalRssi = bundle.optionalInt(SomewearGatewayContract.Key.MESH_RSSI),
+        canBackhaulData = bundle.optionalBoolean(
+            SomewearGatewayContract.Key.MESH_CAN_BACKHAUL,
+        ),
+        updatedAtEpochMillis = bundle.positiveLongOrNull(
+            SomewearGatewayContract.Key.MESH_UPDATED_AT_MS,
+        ),
+        sampledAtEpochMillis = bundle.getLong(
+            SomewearGatewayContract.Key.SAMPLED_AT_MS,
+            System.currentTimeMillis(),
+        ),
+    )
+
     private fun parseDeliveryUpdate(bundle: Bundle, fallbackMessageId: String): DeliveryUpdate =
         DeliveryUpdate(
             messageId = bundle.getString(SomewearGatewayContract.Key.MESSAGE_ID) ?: fallbackMessageId,
@@ -747,6 +1006,29 @@ internal class ContentProviderSomewearClient(
         content = bundle.getString(SomewearGatewayContract.Key.CONTENT).orEmpty(),
         workspaceId = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
         senderId = bundle.getString(SomewearGatewayContract.Key.SENDER_ID),
+        receivedAtEpochMillis = bundle.getLong(SomewearGatewayContract.Key.RECEIVED_AT_MS),
+        channel = enumValueOrUnknown(
+            bundle.getString(SomewearGatewayContract.Key.DELIVERED_CHANNEL),
+            DeviceChannel.UNKNOWN,
+        ),
+    )
+
+    private fun parseIncomingFile(bundle: Bundle): IncomingFile = IncomingFile(
+        sequence = bundle.getLong(SomewearGatewayContract.Key.SEQUENCE),
+        messageId = bundle.getString(SomewearGatewayContract.Key.MESSAGE_ID).orEmpty(),
+        fileId = bundle.getString(SomewearGatewayContract.Key.FILE_ID).orEmpty(),
+        fileName = bundle.getString(SomewearGatewayContract.Key.FILE_NAME).orEmpty(),
+        mimeType = bundle.getString(SomewearGatewayContract.Key.MIME_TYPE),
+        sizeBytes = bundle.getLong(SomewearGatewayContract.Key.FILE_SIZE_BYTES),
+        workspaceId = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
+        senderId = bundle.getString(SomewearGatewayContract.Key.SENDER_ID),
+        fileOwnerUserId = bundle.getString(SomewearGatewayContract.Key.FILE_USER_ID),
+        createdAtEpochMillis = bundle.positiveLongOrNull(
+            SomewearGatewayContract.Key.FILE_CREATED_AT_MS,
+        ),
+        uploadedAtEpochMillis = bundle.positiveLongOrNull(
+            SomewearGatewayContract.Key.FILE_UPLOADED_AT_MS,
+        ),
         receivedAtEpochMillis = bundle.getLong(SomewearGatewayContract.Key.RECEIVED_AT_MS),
         channel = enumValueOrUnknown(
             bundle.getString(SomewearGatewayContract.Key.DELIVERED_CHANNEL),
@@ -790,6 +1072,9 @@ internal class ContentProviderSomewearClient(
             "ENVIRONMENT_MISMATCH" -> SomewearErrorCode.ENVIRONMENT_MISMATCH
             "JOIN_FAILED" -> SomewearErrorCode.JOIN_FAILED
             "RECEIVE_FAILED" -> SomewearErrorCode.RECEIVE_FAILED
+            "FILE_READ_FAILED" -> SomewearErrorCode.FILE_READ_FAILED
+            "FILE_UPLOAD_FAILED" -> SomewearErrorCode.FILE_UPLOAD_FAILED
+            "FILE_DOWNLOAD_FAILED" -> SomewearErrorCode.FILE_DOWNLOAD_FAILED
             "PAYLOAD_TOO_LARGE_FOR_RADIO" -> SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO
             "MALFORMED_RESPONSE" -> SomewearErrorCode.MALFORMED_RESPONSE
             "NO_DEVICE_FOUND" -> SomewearErrorCode.USB_NO_DEVICE
@@ -808,6 +1093,9 @@ internal class ContentProviderSomewearClient(
 
     private fun invalid(method: String, message: String): SomewearResult.Failure =
         SomewearResult.Failure(SomewearError(SomewearErrorCode.INVALID_REQUEST, message, method))
+
+    private fun malformed(method: String, message: String): SomewearResult.Failure =
+        SomewearResult.Failure(SomewearError(SomewearErrorCode.MALFORMED_RESPONSE, message, method))
 }
 
 internal fun normalizeBluetoothMacAddress(value: String): String? {
@@ -846,6 +1134,38 @@ internal fun sameDeviceObservation(
 ): Boolean = when {
     previous is SomewearResult.Success && next is SomewearResult.Success ->
         previous.value == next.value
+    previous is SomewearResult.Failure && next is SomewearResult.Failure ->
+        previous.error.code == next.error.code &&
+            previous.error.message == next.error.message &&
+            previous.error.method == next.error.method
+    else -> false
+}
+
+internal fun sameNodeTelemetryObservation(
+    previous: SomewearResult<NodeTelemetry>,
+    next: SomewearResult<NodeTelemetry>,
+): Boolean = sameObservation(
+    previous,
+    next,
+    { it.copy(sampledAtEpochMillis = 0L) },
+)
+
+internal fun sameMeshNetworkObservation(
+    previous: SomewearResult<MeshNetworkStatus>,
+    next: SomewearResult<MeshNetworkStatus>,
+): Boolean = sameObservation(
+    previous,
+    next,
+    { it.copy(sampledAtEpochMillis = 0L) },
+)
+
+private fun <T> sameObservation(
+    previous: SomewearResult<T>,
+    next: SomewearResult<T>,
+    normalize: (T) -> T,
+): Boolean = when {
+    previous is SomewearResult.Success && next is SomewearResult.Success ->
+        normalize(previous.value) == normalize(next.value)
     previous is SomewearResult.Failure && next is SomewearResult.Failure ->
         previous.error.code == next.error.code &&
             previous.error.message == next.error.message &&

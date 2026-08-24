@@ -19,6 +19,11 @@
   `getReceiveHealth`; callback exceptions are no longer silently swallowed.
 - exposes the retained Node hardware-settings, connection-mode, and guarded
   factory-reset workflows without exporting vendor objects to SC3.
+- exposes non-secret Node/satellite telemetry, mesh-neighbour status, message
+  cancellation, and guarded Node power commands.
+- exposes the retained cloud-backed file workflow: signed upload preparation,
+  native `FileMetadataPayload` send/receive, and signed download preparation;
+  large file bytes never cross the ContentProvider extras Bundle.
 - preflights the fully encoded Somewear package and carries oversized
   `RADIO_ONLY` JSON as checksummed ordinary radio `MessagePayload` records,
   with bounded receiver-side reassembly and aggregate delivery status;

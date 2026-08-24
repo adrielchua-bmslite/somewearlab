@@ -1,5 +1,6 @@
 package com.sc3.somewear.sdk
 
+import android.net.Uri
 import kotlinx.coroutines.flow.Flow
 
 public interface SomewearClient : AutoCloseable {
@@ -16,6 +17,18 @@ public interface SomewearClient : AutoCloseable {
     public suspend fun setNodeConnectionMode(mode: NodeConnectionMode): SomewearResult<Unit>
     public suspend fun deviceStatus(): SomewearResult<DeviceStatus>
 
+    /** Current Node health and satellite signal. Quality is 0..5; >=2 is sendable. */
+    public suspend fun nodeTelemetry(): SomewearResult<NodeTelemetry>
+
+    /** Polls [nodeTelemetry] and emits only changed snapshots. */
+    public fun observeNodeTelemetry(): Flow<SomewearResult<NodeTelemetry>>
+
+    /** Latest mesh-neighbour update reported by the connected Node. */
+    public suspend fun meshNetworkStatus(): SomewearResult<MeshNetworkStatus>
+
+    /** Polls [meshNetworkStatus] and emits only changed snapshots. */
+    public fun observeMeshNetworkStatus(): Flow<SomewearResult<MeshNetworkStatus>>
+
     /** Emits immediately, then only when the status value actually changes. */
     public fun observeDeviceConnection(): Flow<SomewearResult<DeviceStatus>>
 
@@ -23,6 +36,8 @@ public interface SomewearClient : AutoCloseable {
     public fun observeDeviceStatus(): Flow<SomewearResult<DeviceStatus>>
     public suspend fun disconnect(): SomewearResult<Unit>
     public suspend fun shutdown(): SomewearResult<Unit>
+    public suspend fun powerOn(): SomewearResult<Unit>
+    public suspend fun powerOff(): SomewearResult<Unit>
 
     public suspend fun hardwareSettings(): SomewearResult<HardwareSettings>
     public suspend fun setTrackingEnabled(enabled: Boolean): SomewearResult<Unit>
@@ -47,6 +62,7 @@ public interface SomewearClient : AutoCloseable {
     ): SomewearResult<Unit>
 
     public suspend fun send(request: SendRequest): SomewearResult<SendReceipt>
+    public suspend fun cancelMessage(messageId: String): SomewearResult<Unit>
     public suspend fun deliveryStatus(messageId: String): SomewearResult<DeliveryUpdate>
     public fun observeDeliveryStatus(messageId: String): Flow<DeliveryUpdate>
 
@@ -56,6 +72,28 @@ public interface SomewearClient : AutoCloseable {
     ): SomewearResult<List<IncomingMessage>>
 
     public fun incomingMessages(afterSequence: Long = 0L): Flow<IncomingMessage>
+
+    /**
+     * Uploads a file through the authenticated Somewear service, then sends a small
+     * native FileMetadata payload through the requested Node channel.
+     *
+     * The URI must remain readable until this suspend call completes. File bytes do
+     * not cross Android Binder and do not consume a satellite/radio message payload.
+     */
+    public suspend fun sendFile(request: FileSendRequest): SomewearResult<FileSendReceipt>
+
+    public suspend fun pollIncomingFiles(
+        afterSequence: Long,
+        limit: Int = 50,
+    ): SomewearResult<List<IncomingFile>>
+
+    public fun incomingFiles(afterSequence: Long = 0L): Flow<IncomingFile>
+
+    /** Downloads [file] into a caller-owned content/file URI. */
+    public suspend fun downloadFile(
+        file: IncomingFile,
+        destinationUri: Uri,
+    ): SomewearResult<FileDownloadReceipt>
 
     /** Non-secret counters showing whether the gateway is subscribed and seeing router traffic. */
     public suspend fun receiveHealth(): SomewearResult<ReceiveHealth>
