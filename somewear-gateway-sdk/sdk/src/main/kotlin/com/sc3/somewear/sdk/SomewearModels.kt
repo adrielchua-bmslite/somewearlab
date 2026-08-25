@@ -37,6 +37,7 @@ public enum class SomewearErrorCode {
     ENVIRONMENT_MISMATCH,
     JOIN_FAILED,
     RECEIVE_FAILED,
+    SEND_FAILED,
     FILE_READ_FAILED,
     FILE_UPLOAD_FAILED,
     FILE_DOWNLOAD_FAILED,
@@ -226,12 +227,17 @@ public data class SendRequest(
     val messageId: String = UUID.randomUUID().toString(),
     val targetUserId: Long? = null,
     val radioTimeoutMillis: Long = 30_000L,
+    val satelliteTimeoutMillis: Long = 300_000L,
 ) {
     init {
         require(workspaceId > 0L) { "workspaceId must be positive" }
         require(content.isNotBlank()) { "content must not be blank" }
         require(messageId.isNotBlank()) { "messageId must not be blank" }
+        require(messageId.toByteArray(Charsets.UTF_8).size <= 4 * 1_024) {
+            "messageId must not exceed 4096 UTF-8 bytes"
+        }
         require(radioTimeoutMillis > 0L) { "radioTimeoutMillis must be positive" }
+        require(satelliteTimeoutMillis > 0L) { "satelliteTimeoutMillis must be positive" }
     }
 }
 
@@ -241,6 +247,7 @@ public data class SendReceipt(
     val acceptedAtEpochMillis: Long,
     val fragmentCount: Int = 1,
     val radioFragmented: Boolean = false,
+    val satelliteFallbackArmed: Boolean = false,
 )
 
 public enum class DeliveryStatus {
@@ -294,6 +301,7 @@ public data class FileSendRequest(
     val routePolicy: RoutePolicy = RoutePolicy.RADIO_ONLY,
     val messageId: String = UUID.randomUUID().toString(),
     val radioTimeoutMillis: Long = 30_000L,
+    val satelliteTimeoutMillis: Long = 300_000L,
 ) {
     init {
         require(workspaceId > 0L) { "workspaceId must be positive" }
@@ -302,6 +310,7 @@ public data class FileSendRequest(
         require(mimeType == null || mimeType.isNotBlank()) { "mimeType must not be blank" }
         require(messageId.isNotBlank()) { "messageId must not be blank" }
         require(radioTimeoutMillis > 0L) { "radioTimeoutMillis must be positive" }
+        require(satelliteTimeoutMillis > 0L) { "satelliteTimeoutMillis must be positive" }
     }
 }
 

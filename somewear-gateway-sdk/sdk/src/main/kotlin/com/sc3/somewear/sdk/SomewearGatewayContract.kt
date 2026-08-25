@@ -128,9 +128,11 @@ public object SomewearGatewayContract {
         public const val TARGET_USER_ID: String = "target_user_id"
         public const val ROUTE_POLICY: String = "route_policy"
         public const val RADIO_TIMEOUT_MS: String = "radio_timeout_ms"
+        public const val SATELLITE_TIMEOUT_MS: String = "satellite_timeout_ms"
         public const val PARCEL_ID: String = "parcel_id"
         public const val FRAGMENT_COUNT: String = "fragment_count"
         public const val RADIO_FRAGMENTED: String = "radio_fragmented"
+        public const val SATELLITE_FALLBACK_ARMED: String = "satellite_fallback_armed"
         public const val ACCEPTED_AT_MS: String = "accepted_at_ms"
 
         internal const val FILE_UPLOAD_URL: String = "file_upload_url"

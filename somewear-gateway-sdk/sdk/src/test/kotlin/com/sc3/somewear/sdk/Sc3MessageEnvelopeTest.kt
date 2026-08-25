@@ -1,6 +1,7 @@
 package com.sc3.somewear.sdk
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -42,6 +43,24 @@ class Sc3MessageEnvelopeTest {
         assertEquals("RADIO_ONLY", RoutePolicy.RADIO_ONLY.wireValue)
         assertEquals("RADIO_THEN_SATELLITE", RoutePolicy.RADIO_THEN_SATELLITE.wireValue)
         assertEquals("SATELLITE_ONLY", RoutePolicy.SATELLITE_ONLY.wireValue)
+    }
+
+    @Test
+    fun `satellite gets an independent five minute timeout by default`() {
+        val request = SendRequest(workspaceId = 1L, content = "test")
+
+        assertEquals(30_000L, request.radioTimeoutMillis)
+        assertEquals(300_000L, request.satelliteTimeoutMillis)
+    }
+
+    @Test
+    fun `fallback message id stays within gateway framing bound`() {
+        try {
+            SendRequest(workspaceId = 1L, content = "test", messageId = "x".repeat(4_097))
+            fail("Expected the oversized messageId to be rejected")
+        } catch (_: IllegalArgumentException) {
+            // Expected.
+        }
     }
 
     @Test

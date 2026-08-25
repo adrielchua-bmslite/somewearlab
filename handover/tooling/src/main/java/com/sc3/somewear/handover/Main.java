@@ -95,6 +95,9 @@ public final class Main {
             Path apk = apkDir.resolve(apkName);
             requireFile(apk, "gateway split");
             String signer = verifyApk(apk);
+            if ("com.somewearlabs.swtak.plugin.apk".equals(apkName)) {
+                verifyGatewayApkContract(apk);
+            }
             if (expectedSigner == null) {
                 expectedSigner = signer;
             } else if (!expectedSigner.equalsIgnoreCase(signer)) {
@@ -139,6 +142,18 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/GatewayV2.java"
         );
+        Path fallbackCoordinator = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/RouteFallbackCoordinator.java"
+        );
+        Path fallbackEnvelope = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/FallbackMessageEnvelope.java"
+        );
+        Path inboundDeduplicator = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/InboundDeduplicator.java"
+        );
         Path scanner = repoRoot.resolve(
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/WorkspaceQrScannerActivity.java"
@@ -163,6 +178,9 @@ public final class Main {
         );
         requireFile(provider, "gateway provider patch");
         requireFile(helper, "gateway v2 helper");
+        requireFile(fallbackCoordinator, "radio-to-satellite fallback coordinator");
+        requireFile(fallbackEnvelope, "fallback message envelope");
+        requireFile(inboundDeduplicator, "cross-channel inbound deduplicator");
         requireFile(scanner, "gateway QR scanner source");
         requireFile(receiveService, "gateway bound receive service source");
         requireFile(helperManifest, "gateway helper manifest");
@@ -199,6 +217,16 @@ public final class Main {
                 || !helperSource.contains("Unknown gateway method: ")) {
             throw new IllegalStateException(
                     "GatewayV2 must intercept legacy raw and unknown methods before provider dispatch"
+            );
+        }
+        if (!helperSource.contains("radio_then_satellite")
+                || !helperSource.contains("satellite_timeout")
+                || !helperSource.contains("satellite_timeout_ms")
+                || !helperSource.contains("ROUTE_FALLBACKS")
+                || !helperSource.contains("performFallbackLocked")
+                || !helperSource.contains("sendOptions(\"Satellite\"")) {
+            throw new IllegalStateException(
+                    "GatewayV2 must implement controlled Radio-to-Satellite fallback"
             );
         }
         if (!helperSource.contains("if (\"listWorkspaces\".equals(method)) return listWorkspaces()")
@@ -304,6 +332,9 @@ public final class Main {
     private static void verifySdkAar(Path aar) throws Exception {
         Set<String> classes = new HashSet<>();
         String somewearClientSymbols = null;
+        String sendRequestSymbols = null;
+        String fileSendRequestSymbols = null;
+        String sendReceiptSymbols = null;
         String manifest;
         try (ZipFile archive = new ZipFile(aar.toFile())) {
             ZipEntry classesJar = archive.getEntry("classes.jar");
@@ -322,6 +353,15 @@ public final class Main {
                     String classBytes = new String(jar.readAllBytes(), StandardCharsets.ISO_8859_1);
                     if ("com/sc3/somewear/sdk/SomewearClient.class".equals(entry.getName())) {
                         somewearClientSymbols = classBytes;
+                    }
+                    if ("com/sc3/somewear/sdk/SendRequest.class".equals(entry.getName())) {
+                        sendRequestSymbols = classBytes;
+                    }
+                    if ("com/sc3/somewear/sdk/FileSendRequest.class".equals(entry.getName())) {
+                        fileSendRequestSymbols = classBytes;
+                    }
+                    if ("com/sc3/somewear/sdk/SendReceipt.class".equals(entry.getName())) {
+                        sendReceiptSymbols = classBytes;
                     }
                     if (classBytes.contains("com/google/mlkit")
                             || classBytes.contains("androidx/camera")) {
@@ -343,7 +383,10 @@ public final class Main {
                 "com/sc3/somewear/sdk/FactoryResetConfirmation.class",
                 "com/sc3/somewear/sdk/WorkspaceInviteCode.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScanContract.class",
-                "com/sc3/somewear/sdk/WorkspaceQrScannerActivity.class"
+                "com/sc3/somewear/sdk/WorkspaceQrScannerActivity.class",
+                "com/sc3/somewear/sdk/SendRequest.class",
+                "com/sc3/somewear/sdk/FileSendRequest.class",
+                "com/sc3/somewear/sdk/SendReceipt.class"
         );
         for (String requiredClass : requiredClasses) {
             if (!classes.contains(requiredClass)) {
@@ -352,6 +395,16 @@ public final class Main {
         }
         if (somewearClientSymbols == null) {
             throw new IllegalStateException("SDK AAR is missing SomewearClient symbols");
+        }
+        if (sendRequestSymbols == null
+                || fileSendRequestSymbols == null
+                || sendReceiptSymbols == null
+                || !sendRequestSymbols.contains("satelliteTimeoutMillis")
+                || !fileSendRequestSymbols.contains("satelliteTimeoutMillis")
+                || !sendReceiptSymbols.contains("satelliteFallbackArmed")) {
+            throw new IllegalStateException(
+                    "SDK AAR is missing the Radio-to-Satellite timeout/receipt contract"
+            );
         }
         List<String> requiredMethods = List.of(
                 "observeDeviceConnection",
@@ -379,6 +432,36 @@ public final class Main {
                 || !manifest.contains("WorkspaceQrScannerActivity")) {
             throw new IllegalStateException("SDK AAR is missing the QR scanner manifest contract");
         }
+    }
+
+    private static void verifyGatewayApkContract(Path apk) throws Exception {
+        boolean coordinator = false;
+        boolean envelope = false;
+        boolean deduplicator = false;
+        boolean capability = false;
+        boolean timeout = false;
+        try (ZipFile archive = new ZipFile(apk.toFile())) {
+            var entries = archive.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (!entry.getName().matches("classes[0-9]*\\.dex")) continue;
+                String dex = new String(
+                        archive.getInputStream(entry).readAllBytes(),
+                        StandardCharsets.ISO_8859_1
+                );
+                coordinator |= dex.contains("Lcom/somewearlabs/gateway/RouteFallbackCoordinator;");
+                envelope |= dex.contains("Lcom/somewearlabs/gateway/FallbackMessageEnvelope;");
+                deduplicator |= dex.contains("Lcom/somewearlabs/gateway/InboundDeduplicator;");
+                capability |= dex.contains("radio_then_satellite");
+                timeout |= dex.contains("satellite_timeout_ms");
+            }
+        }
+        if (!coordinator || !envelope || !deduplicator || !capability || !timeout) {
+            throw new IllegalStateException(
+                    "base APK is missing the controlled Radio-to-Satellite implementation"
+            );
+        }
+        System.out.println("gateway_radio_satellite_contract=OK");
     }
 
     private static void resign(

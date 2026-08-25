@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v12. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v13. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -30,6 +30,11 @@
 - assigns every radio fragment a persisted, distinct whole-second timestamp so
   the retained receiver's message duplicate query does not discard different
   fragments that were queued during the same second.
+- implements `RADIO_THEN_SATELLITE` as one Radio attempt followed by at most one
+  Satellite-only attempt after an unsuccessful terminal status or timeout;
+  Satellite has its own timeout and explicit SC3 cancellation disarms fallback.
+- preserves the SC3 message ID across both attempts and suppresses a late
+  cross-channel duplicate at the receiver.
 - rejects unknown provider methods before reading raw-payload extras and invokes
   the last-known-good legacy raw dispatcher only for recognized API-v1 methods;
   API v2 never exposes raw payload calls.

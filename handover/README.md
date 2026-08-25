@@ -187,6 +187,15 @@ thresholds. This is Node-to-Node mesh strength, not Bluetooth strength. These
 reads do not select a transport. SC3 must still use an explicit `RoutePolicy`
 for every send.
 
+Use `RADIO_ONLY` by default. When the operator explicitly approves Satellite
+fallback, use `RADIO_THEN_SATELLITE` with separate budgets such as
+`radioTimeoutMillis = 30_000L` and `satelliteTimeoutMillis = 300_000L`.
+Gateway v13 queues only Radio first and makes at most one Satellite-only attempt
+after an unsuccessful terminal Radio state or timeout. Observe
+`satelliteFallbackArmed` and `deliveryStatus(messageId).deliveredChannel`.
+Calling `cancelMessage(messageId)` disarms a pending fallback before canceling
+the Radio parcels.
+
 For images/documents, call `sendFile(FileSendRequest)` with an Android content
 URI. The SDK streams the file to a Somewear signed upload URL, then sends only
 native file metadata through Radio or Satellite. The receiver collects
@@ -224,6 +233,7 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | `lateinit property instanceProvider has not been initialized` | An original or older ATAK plugin was re-signed/installed without the standalone Somewear bootstrap. | Pull the latest repository, re-sign only `build/signed-splits-v2`, and install all five resulting APKs together. |
 | `Call Realm.init(Context) before creating a RealmConfiguration` | The installed gateway predates the application-level Realm bootstrap. | Pull the latest repository, re-sign `build/signed-splits-v2`, and reinstall all five gateway splits. |
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
+| `SEND_FAILED` | Neither the initial Radio attempt nor the controlled Satellite fallback could be queued. | Confirm the Node is connected, Satellite is enabled/provisioned, and retry only under operator policy. |
 | `PAYLOAD_TOO_LARGE_FOR_RADIO` | The message exceeds the v12 bounded radio-framing limit or cannot fit its framing header in one Node transmission. | Reduce/compress the application payload or use an explicitly approved transport; the gateway will not silently enable satellite. |
 | `INVALID_INVITE` | The QR/pasted invite is malformed, expired, revoked, or rejected. | Scan a newly issued Somewear workspace invite and submit it once. Do not log it. |
 | `NETWORK_UNAVAILABLE` or `TIMEOUT` | Workspace join/sync could not reach the Somewear service. | Restore internet access and retry the same operator-approved operation. |
@@ -242,8 +252,9 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | File call returns `FILE_READ_FAILED` | SC3 lost URI permission or the picker URI cannot be reopened. | Retain URI permission when applicable and keep the URI readable until `sendFile()` completes. |
 | File call returns `FILE_UPLOAD_FAILED` or `FILE_DOWNLOAD_FAILED` | The signed-ticket request, data connection, HTTP transfer, or destination URI failed. | Confirm Somewear authentication/workspace membership, phone data access, and URI access; retry under application policy. |
 | Connected but no incoming messages and no error | An older gateway had no receive-lifetime service and swallowed router callback exceptions, or SC3 is not collecting `incomingMessages()`. | Update both AAR and all five gateway splits. Start the Flow before peer transmission and inspect `receiveHealth()`: zero callbacks points to Node/workspace/radio delivery; ignored callbacks indicate a non-`MessagePayload`; queued messages point to an SC3 cursor/UI issue. |
-| Small text works but larger JSON changes to Satellite or returns `ChannelDisabled` | The installed gateway predates v11 and allowed the retained Somewear composite path to rewrite split parts to Satellite. | Update the AAR and re-sign/reinstall all five prepared v12 gateway splits on both devices. Confirm `info().capabilities` contains `radio_fragmentation`. |
-| Sender reports every fragment delivered over Radio, but the receiver exposes only the first two and reports no SDK error | Gateway v11 used the same whole-second timestamp for every `MessagePayload`, so the retained receiver discarded fragment three onward as duplicates. | Install/re-sign the prepared v12 split set on both devices and confirm `info().capabilities` contains `radio_fragment_dedup`. Do not substitute Raw/DataPayload; this retained router removes Radio from Raw traffic. |
+| Small text works but larger JSON changes to Satellite or returns `ChannelDisabled` | The installed gateway predates v11 and allowed the retained Somewear composite path to rewrite split parts to Satellite. | Update the AAR and re-sign/reinstall all five prepared v13 gateway splits on both devices. Confirm `info().capabilities` contains `radio_fragmentation`. |
+| Sender reports every fragment delivered over Radio, but the receiver exposes only the first two and reports no SDK error | Gateway v11 used the same whole-second timestamp for every `MessagePayload`, so the retained receiver discarded fragment three onward as duplicates. | Install/re-sign the prepared v13 split set on both devices and confirm `info().capabilities` contains `radio_fragment_dedup`. Do not substitute Raw/DataPayload; this retained router removes Radio from Raw traffic. |
+| `RADIO_THEN_SATELLITE` returns `UNSUPPORTED` | The base APK predates gateway v13 even if the AAR exposes the enum. | Re-sign/reinstall all five prepared v13 splits and confirm `info().capabilities` contains `radio_then_satellite` and `satellite_timeout`. |
 
 ## Operational limitations
 
@@ -251,5 +262,7 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 - File/image upload and download require the authenticated Somewear service and
   phone data access. Only the small metadata announcement uses the selected Node
   channel; this build does not send multi-megabyte file bytes over mesh radio.
-- `RADIO_THEN_SATELLITE` remains unsupported. QR enrollment, workspace synchronization, and cache selection are exposed, but a real issued invite, key transfer, and peer delivery still require account/hardware acceptance testing.
+- `RADIO_THEN_SATELLITE` is implemented and Android-tested, but a real issued
+  invite, key transfer, peer Radio delivery, Satellite visibility, and terminal
+  over-air acknowledgement still require account/hardware acceptance testing.
 - The gateway artifacts contain vendor-derived code. Keep the repository and downstream artifacts access-controlled and obtain the required Somewear licensing/approval before deployment or redistribution.

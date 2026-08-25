@@ -274,6 +274,10 @@ internal class ContentProviderSomewearClient(
                 }
                 putString(SomewearGatewayContract.Key.ROUTE_POLICY, request.routePolicy.wireValue)
                 putLong(SomewearGatewayContract.Key.RADIO_TIMEOUT_MS, request.radioTimeoutMillis)
+                putLong(
+                    SomewearGatewayContract.Key.SATELLITE_TIMEOUT_MS,
+                    request.satelliteTimeoutMillis,
+                )
             },
         ).map { bundle ->
             SendReceipt(
@@ -287,6 +291,10 @@ internal class ContentProviderSomewearClient(
                 fragmentCount = bundle.getInt(SomewearGatewayContract.Key.FRAGMENT_COUNT, 1),
                 radioFragmented = bundle.getBoolean(
                     SomewearGatewayContract.Key.RADIO_FRAGMENTED,
+                    false,
+                ),
+                satelliteFallbackArmed = bundle.getBoolean(
+                    SomewearGatewayContract.Key.SATELLITE_FALLBACK_ARMED,
                     false,
                 ),
             )
@@ -427,6 +435,10 @@ internal class ContentProviderSomewearClient(
                     putLong(SomewearGatewayContract.Key.WORKSPACE_ID, request.workspaceId)
                     putString(SomewearGatewayContract.Key.ROUTE_POLICY, request.routePolicy.wireValue)
                     putLong(SomewearGatewayContract.Key.RADIO_TIMEOUT_MS, request.radioTimeoutMillis)
+                    putLong(
+                        SomewearGatewayContract.Key.SATELLITE_TIMEOUT_MS,
+                        request.satelliteTimeoutMillis,
+                    )
                 },
             )
             if (sent is SomewearResult.Failure) return@withContext sent
@@ -456,6 +468,10 @@ internal class ContentProviderSomewearClient(
                         acceptedAtEpochMillis = result.getLong(
                             SomewearGatewayContract.Key.ACCEPTED_AT_MS,
                             System.currentTimeMillis(),
+                        ),
+                        satelliteFallbackArmed = result.getBoolean(
+                            SomewearGatewayContract.Key.SATELLITE_FALLBACK_ARMED,
+                            false,
                         ),
                     ),
                 ),
@@ -1072,6 +1088,7 @@ internal class ContentProviderSomewearClient(
             "ENVIRONMENT_MISMATCH" -> SomewearErrorCode.ENVIRONMENT_MISMATCH
             "JOIN_FAILED" -> SomewearErrorCode.JOIN_FAILED
             "RECEIVE_FAILED" -> SomewearErrorCode.RECEIVE_FAILED
+            "SEND_FAILED" -> SomewearErrorCode.SEND_FAILED
             "FILE_READ_FAILED" -> SomewearErrorCode.FILE_READ_FAILED
             "FILE_UPLOAD_FAILED" -> SomewearErrorCode.FILE_UPLOAD_FAILED
             "FILE_DOWNLOAD_FAILED" -> SomewearErrorCode.FILE_DOWNLOAD_FAILED

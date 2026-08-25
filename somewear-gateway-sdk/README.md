@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v12 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, radio-safe JSON fragmentation/reassembly, duplicate-filter-safe fragment timestamps, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness. Automatic radio-then-satellite fallback remains unsupported.
+The SDK exposes the complete SC3-facing contract. Gateway v13 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, radio-safe JSON fragmentation/reassembly, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -29,6 +29,10 @@ The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. 
 See [`FILE_API_TEST_REPORT.md`](FILE_API_TEST_REPORT.md) for the exact file,
 telemetry, and two-emulator regression evidence and the remaining physical/cloud
 acceptance boundary.
+
+See [`RADIO_SATELLITE_FALLBACK_TEST_REPORT.md`](RADIO_SATELLITE_FALLBACK_TEST_REPORT.md)
+for the route-state race tests, two-emulator APK evidence, duplicate suppression,
+cancellation result, and remaining over-air acceptance boundary.
 
 ## Requirements
 
@@ -403,7 +407,7 @@ v12 therefore gives every fragment a distinct timestamp and persists the last
 reservation so timestamps are not reused after process restart. Generic Raw
 payloads are not used because the retained router removes Radio from that type.
 
-Both devices must run the same v12 gateway build for fragmented messages.
+Both devices must run gateway v12 or newer for fragmented messages.
 Unfragmented small messages remain compatible with older gateways.
 
 `SendReceipt.fragmentCount` reports the number of ordinary radio messages
@@ -423,6 +427,39 @@ Available policies:
 For cost control, the gateway must implement radio-then-satellite as two controlled sends. It must not pass `{Radio, Satellite}` together as one channel set.
 
 The SDK never silently upgrades `RADIO_ONLY` to satellite and never falls back to legacy `sendMessage`.
+
+For an operator-approved fallback send:
+
+```kotlin
+val result = somewear.send(
+    SendRequest(
+        workspaceId = workspaceId,
+        content = envelope.encode(),
+        messageId = envelope.id,
+        routePolicy = RoutePolicy.RADIO_THEN_SATELLITE,
+        radioTimeoutMillis = 30_000L,
+        satelliteTimeoutMillis = 300_000L,
+    ),
+)
+```
+
+Gateway v13 queues only Radio first. If every Radio parcel is delivered, it
+removes the fallback. If the retained core reports an unsuccessful terminal
+state (`ERROR`, `CANCELED`, or `COLLAPSED`) or the radio delivery timer expires,
+the gateway atomically cancels the old Radio parcels and makes exactly one
+Satellite-only attempt. An explicit `cancelMessage()` removes the plan before
+canceling its parcels, so it never spends satellite later.
+
+`SendReceipt.satelliteFallbackArmed` is true when the Radio attempt is active
+and a future Satellite attempt is armed. After handover,
+`deliveryStatus(messageId).deliveredChannel` changes to `SATELLITE`. The
+Satellite attempt uses `satelliteTimeoutMillis` (five minutes by default), not
+the short Radio timeout.
+
+Both route attempts carry the SC3 `messageId`. The receiver keeps the first
+copy and suppresses a late duplicate from the other channel for 24 hours. Both
+devices must run gateway v13 for `RADIO_THEN_SATELLITE`; this does not change
+the compatibility of ordinary unfragmented `RADIO_ONLY` messages.
 
 ### Delivery status
 
@@ -512,6 +549,9 @@ val result = somewear.sendFile(
         fileName = "recon-01.jpg",       // optional; inferred when omitted
         mimeType = "image/jpeg",         // optional; inferred when omitted
         routePolicy = RoutePolicy.RADIO_ONLY,
+        // For an approved fallback instead:
+        // routePolicy = RoutePolicy.RADIO_THEN_SATELLITE,
+        // satelliteTimeoutMillis = 300_000L,
     ),
 )
 
@@ -766,12 +806,12 @@ Every method returns a `Bundle` with:
 | `disconnect` | none | common result |
 | `shutdown` | none | common result |
 | `powerOn` / `powerOff` | none | accepted connected-Node power command |
-| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `radio_fragmented`, `accepted_at_ms` |
+| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms`, `satellite_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `radio_fragmented`, `satellite_fallback_armed`, `accepted_at_ms` |
 | `cancelMessage` | `message_id` | canceled fragment count |
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
 | `prepareFileUpload` | name, MIME, SHA-256, byte count, workspace | internal signed-upload ticket and file metadata |
-| `sendFileMetadata` | prepared file metadata, message ID, workspace, route policy | parcel/message/file acceptance fields |
+| `sendFileMetadata` | prepared file metadata, message ID, workspace, route policy, radio/satellite timeouts | parcel/message/file acceptance fields and `satellite_fallback_armed` |
 | `pollIncomingFiles` | `after_sequence`, `limit` | file-metadata `items: ArrayList<Bundle>` |
 | `getFileDownloadUrl` | `file_id`, `workspace_id` | internal signed-download ticket |
 | `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, queue, and last-event counters |
@@ -802,7 +842,7 @@ are not logged, persisted, or exposed to UI code.
 
 ## Gateway compatibility
 
-| Capability | Gateway v12 | Validation/work remaining |
+| Capability | Gateway v13 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -820,7 +860,7 @@ are not logged, persisted, or exposed to UI code.
 | Mesh-network snapshot | Yes | Empty-state Android validation passed; live peer RSSI/topology requires hardware validation |
 | File/image metadata receive | Yes | Native 25 MB and 50 MB image metadata records parsed and polled as Radio on two Android runtimes without transferring bytes through Binder |
 | File/image upload and download | Yes | SDK/gateway build and signed-ticket paths implemented; live authenticated Somewear service upload/download remains account acceptance testing |
-| Automatic radio-then-satellite fallback | No, safely rejected | Implement terminal timeout policy |
+| Automatic radio-then-satellite fallback | Yes | Race/timeout/cancel/dedup unit tested; the signed APK queued Radio then Satellite on two Android runtimes and exposed `SATELLITE` delivery status; live over-air terminal delivery still requires provisioned Nodes |
 | QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |
 | Bound service lifetime | Yes | Android idle/frozen-provider regression validated; keep `SomewearClient` open |
@@ -835,10 +875,13 @@ Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back t
 4. Subscribe to `SomewearRouter.getPayload()` for inbound payloads and status updates.
 5. Export `RouterPayload.summaryStatus` and `RouterPayload.deliveredDeviceChannel`.
 6. Make `RADIO_ONLY` the safe default and never widen its channel set.
-7. Split oversized Radio traffic above Somewear Core into ordinary `MessagePayload` records; never use the retained Radio `PackageType.Part` path.
-8. Keep USB/Bluetooth permissions and connection ownership in the gateway package.
-9. Run long-lived connection and inbound collection work from a foreground or bound service. The ContentProvider may remain as the command/polling compatibility surface.
-10. Do not export authentication secrets, traffic keys, or mesh-key bytes through IPC.
+7. Implement `RADIO_THEN_SATELLITE` as two serialized attempts: Radio first,
+   then at most one Satellite-only send after a failed terminal state or timer.
+   Never pass `{Radio, Satellite}` to the retained core together.
+8. Split oversized Radio traffic above Somewear Core into ordinary `MessagePayload` records; never use the retained Radio `PackageType.Part` path.
+9. Keep USB/Bluetooth permissions and connection ownership in the gateway package.
+10. Run long-lived connection and inbound collection work from a foreground or bound service. The ContentProvider may remain as the command/polling compatibility surface.
+11. Do not export authentication secrets, traffic keys, or mesh-key bytes through IPC.
 
 ## Security and deployment
 

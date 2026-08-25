@@ -28,6 +28,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -47,6 +49,9 @@ public final class GatewayV2 {
     private static final long DEFAULT_WORKSPACE_TIMEOUT_MS = 45_000L;
     private static final long MAX_WORKSPACE_TIMEOUT_MS = 120_000L;
     private static final long DEFAULT_SETTINGS_TIMEOUT_MS = 30_000L;
+    private static final long DEFAULT_RADIO_TIMEOUT_MS = 30_000L;
+    private static final long DEFAULT_SATELLITE_TIMEOUT_MS = 300_000L;
+    private static final long INBOUND_DEDUP_TTL_MS = 24L * 60L * 60L * 1_000L;
     private static final int SETTING_TRACKING_ENABLED = 0;
     private static final int SETTING_TRACKING_FREQUENCY = 1;
     private static final int SETTING_NO_SLEEP = 4;
@@ -68,6 +73,16 @@ public final class GatewayV2 {
             new RadioMessageReassembler();
     private static final FragmentDeliveryTracker DELIVERY_TRACKER =
             new FragmentDeliveryTracker();
+    private static final RouteFallbackCoordinator<SatelliteAttempt> ROUTE_FALLBACKS =
+            new RouteFallbackCoordinator<>();
+    private static final InboundDeduplicator INBOUND_DEDUP =
+            new InboundDeduplicator(4_000, INBOUND_DEDUP_TTL_MS);
+    private static final ScheduledExecutorService FALLBACK_EXECUTOR =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "sc3-radio-satellite-fallback");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private static Context appContext;
     private static Object payloadSubscription;
@@ -114,6 +129,9 @@ public final class GatewayV2 {
             if ("testDispatchRouterMessage".equals(method)) return dispatchTestRouterMessage(extras);
             if ("testDispatchFramedRouterMessage".equals(method)) {
                 return dispatchTestFramedRouterMessage(extras);
+            }
+            if ("testDispatchFallbackRouterMessage".equals(method)) {
+                return dispatchTestFallbackRouterMessage(extras);
             }
             if ("testDispatchFileMetadata".equals(method)) {
                 return dispatchTestFileMetadata(extras);
@@ -219,7 +237,9 @@ public final class GatewayV2 {
                 "radio_only",
                 "radio_fragmentation",
                 "radio_fragment_dedup",
+                "radio_then_satellite",
                 "satellite_only",
+                "satellite_timeout",
                 "delivery_status",
                 "message_cancel",
                 "incoming_messages",
@@ -676,24 +696,48 @@ public final class GatewayV2 {
 
         String policy = extras.getString("route_policy", "RADIO_ONLY");
         final String channel;
+        final boolean fallback;
         if ("RADIO_ONLY".equalsIgnoreCase(policy)) {
             channel = "Radio";
+            fallback = false;
         } else if ("SATELLITE_ONLY".equalsIgnoreCase(policy)) {
             channel = "Satellite";
+            fallback = false;
         } else if ("RADIO_THEN_SATELLITE".equalsIgnoreCase(policy)) {
-            return error(
-                    "UNSUPPORTED",
-                    "RADIO_THEN_SATELLITE is disabled until terminal delivery timeout fallback is implemented"
-            );
+            channel = "Radio";
+            fallback = true;
         } else {
             return error("INVALID_REQUEST", "Unknown route_policy: " + policy);
+        }
+
+        long radioTimeout = extras.getLong("radio_timeout_ms", DEFAULT_RADIO_TIMEOUT_MS);
+        long satelliteTimeout = extras.getLong(
+                "satellite_timeout_ms",
+                DEFAULT_SATELLITE_TIMEOUT_MS
+        );
+        if (radioTimeout <= 0L || satelliteTimeout <= 0L) {
+            return error(
+                    "INVALID_REQUEST",
+                    "radio_timeout_ms and satellite_timeout_ms must be positive"
+            );
         }
 
         ensureCoreStarted();
         ensurePayloadSubscription();
 
         List<Object> payloads = new ArrayList<>();
-        Object originalPayload = buildMessagePayload(content, workspaceId);
+        final String fallbackContent;
+        if (fallback) {
+            try {
+                fallbackContent = FallbackMessageEnvelope.encode(messageId, content);
+            } catch (IllegalArgumentException invalidId) {
+                return error("INVALID_REQUEST", invalidId.getMessage());
+            }
+        } else {
+            fallbackContent = null;
+        }
+        String radioContent = fallback ? fallbackContent : content;
+        Object originalPayload = buildMessagePayload(radioContent, workspaceId);
         int originalTransmissionCount = approximateTransmissionCount(originalPayload);
         if ("Radio".equals(channel)) {
             Log.i(
@@ -713,37 +757,73 @@ public final class GatewayV2 {
             payloads.add(originalPayload);
         }
 
+        SatelliteAttempt satelliteAttempt = null;
+        if (fallback) {
+            Object satellitePayload = buildMessagePayload(
+                    fallbackContent,
+                    workspaceId
+            );
+            satelliteAttempt = SatelliteAttempt.of(satellitePayload, satelliteTimeout);
+        }
+
         List<Integer> parcelIds = new ArrayList<>(payloads.size());
         for (Object payload : payloads) {
             parcelIds.add(((Number) invokeNoArgs(payload, "getParcelId")).intValue());
         }
         long acceptedAt = System.currentTimeMillis();
 
+        final RouteFallbackCoordinator.Registration fallbackRegistration;
         synchronized (LOCK) {
             DELIVERY_TRACKER.register(messageId, channel, parcelIds);
+            fallbackRegistration = fallback
+                    ? ROUTE_FALLBACKS.register(messageId, parcelIds, satelliteAttempt)
+                    : null;
             DELIVERY.put(
                     messageId,
                     deliveryBundle(messageId, "QUEUED", channel.toUpperCase(), null, acceptedAt)
             );
         }
 
-        long timeout = extras.getLong("radio_timeout_ms", 30_000L);
         Object router = router();
         Method send = findMethod(router.getClass(), "send", 2);
+        Throwable queueFailure = null;
         try {
             for (Object payload : payloads) {
+                if (fallback && !ROUTE_FALLBACKS.isPending(
+                        messageId,
+                        fallbackRegistration.generation
+                )) break;
+                long timeout = "Satellite".equals(channel) ? satelliteTimeout : radioTimeout;
                 send.invoke(router, payload, sendOptions(channel, timeout));
             }
         } catch (Throwable throwable) {
             FragmentDeliveryTracker.Update failed = DELIVERY_TRACKER.fail(
                     messageId,
                     channel.toUpperCase(Locale.US),
-                    "Gateway could not queue every radio fragment",
+                    "Gateway could not queue every " + channel.toLowerCase(Locale.US) + " parcel",
                     System.currentTimeMillis()
             );
             if (failed != null) storeDeliveryUpdate(failed);
-            throwAsException(throwable);
+            queueFailure = throwable;
         }
+
+        boolean fallbackArmed = false;
+        if (fallback) {
+            fallbackArmed = activateFallback(
+                    messageId,
+                    fallbackRegistration,
+                    radioTimeout,
+                    queueFailure != null
+            );
+            queueFailure = null;
+            if (deliveryIsError(messageId)) {
+                return error(
+                        "SEND_FAILED",
+                        "Somewear could not queue either the radio attempt or satellite fallback"
+                );
+            }
+        }
+        if (queueFailure != null) throwAsException(queueFailure);
 
         Bundle result = ok(
                 payloads.size() == 1
@@ -754,8 +834,112 @@ public final class GatewayV2 {
         result.putInt("parcel_id", parcelIds.get(0));
         result.putInt("fragment_count", payloads.size());
         result.putBoolean("radio_fragmented", payloads.size() > 1);
+        result.putBoolean("satellite_fallback_armed", fallbackArmed);
+        if (fallback) result.putLong("satellite_timeout_ms", satelliteTimeout);
         result.putLong("accepted_at_ms", acceptedAt);
         return result;
+    }
+
+    private static boolean activateFallback(
+            String messageId,
+            RouteFallbackCoordinator.Registration registration,
+            long radioTimeout,
+            boolean forceImmediate
+    ) {
+        final RouteFallbackCoordinator.Decision<SatelliteAttempt> immediate;
+        synchronized (LOCK) {
+            if (forceImmediate) ROUTE_FALLBACKS.onRadioStatus(messageId, "ERROR");
+            immediate = ROUTE_FALLBACKS.arm(messageId, registration.generation);
+            if (immediate != null) {
+                performFallbackLocked(immediate, "Radio attempt failed before delivery");
+                return false;
+            }
+            if (!ROUTE_FALLBACKS.isPending(messageId, registration.generation)) return false;
+        }
+        scheduleFallback(messageId, registration.generation, radioTimeout);
+        return true;
+    }
+
+    private static boolean deliveryIsError(String messageId) {
+        synchronized (LOCK) {
+            Bundle current = DELIVERY.get(messageId);
+            return current != null && "ERROR".equals(current.getString("delivery_status"));
+        }
+    }
+
+    private static void scheduleFallback(String messageId, long generation, long timeoutMillis) {
+        FALLBACK_EXECUTOR.schedule(
+                () -> {
+                    try {
+                        synchronized (LOCK) {
+                            RouteFallbackCoordinator.Decision<SatelliteAttempt> decision =
+                                    ROUTE_FALLBACKS.onTimeout(messageId, generation);
+                            if (decision != null) {
+                                performFallbackLocked(decision, "Radio delivery timed out");
+                            }
+                        }
+                    } catch (Throwable failure) {
+                        Log.w(LOG_TAG, "Fallback scheduler failure: " + rootClassName(failure));
+                        synchronized (LOCK) {
+                            FragmentDeliveryTracker.Update failed = DELIVERY_TRACKER.fail(
+                                    messageId,
+                                    "SATELLITE",
+                                    "Gateway could not start the satellite fallback",
+                                    System.currentTimeMillis()
+                            );
+                            if (failed != null) storeDeliveryUpdate(failed);
+                        }
+                    }
+                },
+                Math.max(1L, timeoutMillis),
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    /** Must be called while holding LOCK so cancellation cannot race the route handover. */
+    private static boolean performFallbackLocked(
+            RouteFallbackCoordinator.Decision<SatelliteAttempt> decision,
+            String reason
+    ) {
+        SatelliteAttempt attempt = decision.satelliteAttempt;
+        DELIVERY_TRACKER.register(decision.messageId, "Satellite", attempt.parcelIds);
+        Bundle queued = deliveryBundle(
+                decision.messageId,
+                "QUEUED",
+                "SATELLITE",
+                null,
+                System.currentTimeMillis()
+        );
+        queued.putString("fallback_reason", reason);
+        queued.putBoolean("satellite_fallback_started", true);
+        DELIVERY.put(decision.messageId, queued);
+
+        try {
+            Object activeRouter = router();
+            for (Integer radioParcelId : decision.radioParcelIds) {
+                try {
+                    invoke(activeRouter, "cancel", radioParcelId);
+                } catch (Throwable cancelFailure) {
+                    Log.w(LOG_TAG, "Radio parcel cancellation failed during satellite handover");
+                }
+            }
+            Method send = findMethod(activeRouter.getClass(), "send", 2);
+            for (Object payload : attempt.payloads) {
+                send.invoke(activeRouter, payload, sendOptions("Satellite", attempt.timeoutMillis));
+            }
+            Log.i(LOG_TAG, "Radio-to-satellite handover queued; parcels=" + attempt.payloads.size());
+            return true;
+        } catch (Throwable failure) {
+            FragmentDeliveryTracker.Update failed = DELIVERY_TRACKER.fail(
+                    decision.messageId,
+                    "SATELLITE",
+                    "Gateway could not queue the satellite fallback",
+                    System.currentTimeMillis()
+            );
+            if (failed != null) storeDeliveryUpdate(failed);
+            Log.w(LOG_TAG, "Satellite fallback queue failed: " + rootClassName(failure));
+            return false;
+        }
     }
 
     private static Object buildMessagePayload(String content, long workspaceId) throws Exception {
@@ -1026,7 +1210,9 @@ public final class GatewayV2 {
         String messageId = requiredString(extras, "message_id");
         final FragmentDeliveryTracker.Cancellation cancellation;
         synchronized (LOCK) {
+            ROUTE_FALLBACKS.cancel(messageId);
             cancellation = DELIVERY_TRACKER.cancel(messageId, System.currentTimeMillis());
+            if (cancellation != null) storeDeliveryUpdate(cancellation.update);
         }
         if (cancellation == null) {
             synchronized (LOCK) {
@@ -1047,7 +1233,6 @@ public final class GatewayV2 {
         for (Integer parcelId : cancellation.parcelIds) {
             invoke(activeRouter, "cancel", parcelId);
         }
-        storeDeliveryUpdate(cancellation.update);
         Bundle result = ok("Somewear message cancellation requested");
         result.putString("message_id", messageId);
         result.putInt("fragment_count", cancellation.parcelIds.size());
@@ -1163,18 +1348,31 @@ public final class GatewayV2 {
         }
 
         final String channel;
+        final boolean fallback;
         String policy = extras.getString("route_policy", "RADIO_ONLY");
         if ("RADIO_ONLY".equalsIgnoreCase(policy)) {
             channel = "Radio";
+            fallback = false;
         } else if ("SATELLITE_ONLY".equalsIgnoreCase(policy)) {
             channel = "Satellite";
+            fallback = false;
         } else if ("RADIO_THEN_SATELLITE".equalsIgnoreCase(policy)) {
-            return error(
-                    "UNSUPPORTED",
-                    "RADIO_THEN_SATELLITE is disabled until terminal delivery timeout fallback is implemented"
-            );
+            channel = "Radio";
+            fallback = true;
         } else {
             return error("INVALID_REQUEST", "Unknown route_policy: " + policy);
+        }
+
+        long radioTimeout = extras.getLong("radio_timeout_ms", DEFAULT_RADIO_TIMEOUT_MS);
+        long satelliteTimeout = extras.getLong(
+                "satellite_timeout_ms",
+                DEFAULT_SATELLITE_TIMEOUT_MS
+        );
+        if (radioTimeout <= 0L || satelliteTimeout <= 0L) {
+            return error(
+                    "INVALID_REQUEST",
+                    "radio_timeout_ms and satellite_timeout_ms must be positive"
+            );
         }
 
         ensureCoreStarted();
@@ -1192,6 +1390,20 @@ public final class GatewayV2 {
                 fileSize,
                 workspaceId
         );
+        SatelliteAttempt satelliteAttempt = null;
+        if (fallback) {
+            Object satellitePayload = buildFileMetadataPayload(
+                    fileId,
+                    fileName,
+                    mimeType,
+                    createdAt > 0L ? createdAt : now,
+                    uploadedAt > 0L ? uploadedAt : now,
+                    fileUserId,
+                    fileSize,
+                    workspaceId
+            );
+            satelliteAttempt = SatelliteAttempt.of(satellitePayload, satelliteTimeout);
+        }
         if ("Radio".equals(channel) && approximateTransmissionCount(payload) != 1) {
             return error(
                     "PAYLOAD_TOO_LARGE_FOR_RADIO",
@@ -1200,18 +1412,30 @@ public final class GatewayV2 {
         }
 
         int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
+        final RouteFallbackCoordinator.Registration fallbackRegistration;
         synchronized (LOCK) {
             DELIVERY_TRACKER.register(messageId, channel, Collections.singletonList(parcelId));
+            fallbackRegistration = fallback
+                    ? ROUTE_FALLBACKS.register(
+                            messageId,
+                            Collections.singletonList(parcelId),
+                            satelliteAttempt
+                    )
+                    : null;
             DELIVERY.put(
                     messageId,
                     deliveryBundle(messageId, "QUEUED", channel.toUpperCase(Locale.US), null, now)
             );
         }
+        Throwable queueFailure = null;
         try {
             findMethod(router().getClass(), "send", 2).invoke(
                     router(),
                     payload,
-                    sendOptions(channel, extras.getLong("radio_timeout_ms", 30_000L))
+                    sendOptions(
+                            channel,
+                            "Satellite".equals(channel) ? satelliteTimeout : radioTimeout
+                    )
             );
         } catch (Throwable failure) {
             FragmentDeliveryTracker.Update failed = DELIVERY_TRACKER.fail(
@@ -1221,8 +1445,26 @@ public final class GatewayV2 {
                     System.currentTimeMillis()
             );
             if (failed != null) storeDeliveryUpdate(failed);
-            throwAsException(failure);
+            queueFailure = failure;
         }
+
+        boolean fallbackArmed = false;
+        if (fallback) {
+            fallbackArmed = activateFallback(
+                    messageId,
+                    fallbackRegistration,
+                    radioTimeout,
+                    queueFailure != null
+            );
+            queueFailure = null;
+            if (deliveryIsError(messageId)) {
+                return error(
+                        "SEND_FAILED",
+                        "Somewear could not queue either the radio metadata or satellite fallback"
+                );
+            }
+        }
+        if (queueFailure != null) throwAsException(queueFailure);
 
         Bundle result = ok("File metadata accepted by SomewearRouter with channel " + channel);
         result.putString("message_id", messageId);
@@ -1232,6 +1474,8 @@ public final class GatewayV2 {
         result.putString("file_name", fileName);
         result.putString("mime_type", mimeType);
         result.putLong("file_size_bytes", fileSize);
+        result.putBoolean("satellite_fallback_armed", fallbackArmed);
+        if (fallback) result.putLong("satellite_timeout_ms", satelliteTimeout);
         return result;
     }
 
@@ -1358,6 +1602,24 @@ public final class GatewayV2 {
         }
         Bundle result = ok("Test framed RouterPayloads dispatched");
         result.putInt("fragment_count", frames.size());
+        return result;
+    }
+
+    /** Exercises the fallback envelope and duplicate suppression in the real receive parser. */
+    private static Bundle dispatchTestFallbackRouterMessage(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String messageId = requiredString(extras, "message_id");
+        String content = requiredString(extras, "message");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        long sourceUserId = extras.getLong("sender_id_long", 42L);
+        String framed = FallbackMessageEnvelope.encode(messageId, content);
+        dispatchInboundTestContent(framed, workspaceId, sourceUserId);
+        if (extras.getBoolean("repeat_duplicate", false)) {
+            dispatchInboundTestContent(framed, workspaceId, sourceUserId);
+        }
+        Bundle result = ok("Test fallback RouterPayload dispatched");
+        result.putInt("dispatch_count", extras.getBoolean("repeat_duplicate", false) ? 2 : 1);
         return result;
     }
 
@@ -2013,7 +2275,9 @@ public final class GatewayV2 {
             subscription = payloadSubscription;
             payloadSubscription = null;
             DELIVERY_TRACKER.clear();
+            ROUTE_FALLBACKS.clear();
             RADIO_REASSEMBLER.clear();
+            INBOUND_DEDUP.clear();
             compositePackager = null;
             fileRemoteSource = null;
         }
@@ -2113,15 +2377,31 @@ public final class GatewayV2 {
                 } catch (Throwable ignored) {
                     // Optional field varies across core releases.
                 }
-                FragmentDeliveryTracker.Update aggregate = DELIVERY_TRACKER.update(
-                        parcelId,
-                        status,
-                        channel,
-                        errorReason,
-                        now
-                );
-                if (aggregate != null) {
-                    storeDeliveryUpdate(aggregate);
+                synchronized (LOCK) {
+                    FragmentDeliveryTracker.Update aggregate = DELIVERY_TRACKER.update(
+                            parcelId,
+                            status,
+                            channel,
+                            errorReason,
+                            now
+                    );
+                    if (aggregate != null) {
+                        RouteFallbackCoordinator.Decision<SatelliteAttempt> fallback =
+                                ROUTE_FALLBACKS.onRadioStatus(
+                                        aggregate.messageId,
+                                        aggregate.status
+                                );
+                        if (fallback != null) {
+                            performFallbackLocked(
+                                    fallback,
+                                    aggregate.errorReason == null
+                                            ? "Radio delivery failed"
+                                            : "Radio delivery failed: " + aggregate.errorReason
+                            );
+                        } else {
+                            storeDeliveryUpdate(aggregate);
+                        }
+                    }
                 }
                 return;
             }
@@ -2136,6 +2416,16 @@ public final class GatewayV2 {
                 String ownerUserId = stringOrNull(invokeNoArgs(payload, "getUserId"));
                 Date createdAt = (Date) invokeNoArgs(payload, "getCreateTimestamp");
                 Date uploadedAt = (Date) invokeNoArgs(payload, "getUploadedTimestamp");
+                String senderId = String.valueOf(sourceUserId);
+                if (!INBOUND_DEDUP.firstSeen(
+                        dedupKey("file", workspaceId, senderId, fileId),
+                        now
+                )) {
+                    synchronized (LOCK) {
+                        ignoredInboundCount++;
+                    }
+                    return;
+                }
                 enqueueIncomingFile(
                         traceId,
                         fileId,
@@ -2143,7 +2433,7 @@ public final class GatewayV2 {
                         mimeType,
                         fileSize,
                         workspaceId,
-                        String.valueOf(sourceUserId),
+                        senderId,
                         ownerUserId,
                         createdAt == null ? 0L : createdAt.getTime(),
                         uploadedAt == null ? 0L : uploadedAt.getTime(),
@@ -2166,6 +2456,42 @@ public final class GatewayV2 {
             long receivedAt = timestamp == null ? now : timestamp.getTime();
             String senderId = String.valueOf(sourceUserId);
             String deliveredChannel = channel.toUpperCase(Locale.US);
+            final FallbackMessageEnvelope.Decoded fallbackEnvelope;
+            try {
+                fallbackEnvelope = FallbackMessageEnvelope.parse(content);
+            } catch (IllegalArgumentException invalidEnvelope) {
+                synchronized (LOCK) {
+                    ignoredInboundCount++;
+                    invalidRadioFragmentCount++;
+                }
+                recordReceiveError("FALLBACK_ENVELOPE", invalidEnvelope);
+                return;
+            }
+            if (fallbackEnvelope != null) {
+                if (INBOUND_DEDUP.firstSeen(
+                        dedupKey(
+                                "message",
+                                workspaceId,
+                                senderId,
+                                fallbackEnvelope.messageId
+                        ),
+                        now
+                )) {
+                    enqueueIncoming(
+                            fallbackEnvelope.messageId,
+                            fallbackEnvelope.content,
+                            workspaceId,
+                            senderId,
+                            deliveredChannel,
+                            receivedAt
+                    );
+                } else {
+                    synchronized (LOCK) {
+                        ignoredInboundCount++;
+                    }
+                }
+                return;
+            }
             RadioMessageReassembler.Result reassembly = RADIO_REASSEMBLER.accept(
                     content,
                     workspaceId,
@@ -2194,14 +2520,23 @@ public final class GatewayV2 {
                         inboundRadioFragmentCount++;
                         completedRadioMessageCount++;
                     }
-                    enqueueIncoming(
-                            reassembly.messageId,
-                            reassembly.content,
-                            workspaceId,
-                            senderId,
-                            deliveredChannel,
-                            reassembly.completedAt
-                    );
+                    if (INBOUND_DEDUP.firstSeen(
+                            dedupKey("message", workspaceId, senderId, reassembly.messageId),
+                            now
+                    )) {
+                        enqueueIncoming(
+                                reassembly.messageId,
+                                reassembly.content,
+                                workspaceId,
+                                senderId,
+                                deliveredChannel,
+                                reassembly.completedAt
+                        );
+                    } else {
+                        synchronized (LOCK) {
+                            ignoredInboundCount++;
+                        }
+                    }
                     break;
                 case INVALID:
                     synchronized (LOCK) {
@@ -2249,6 +2584,18 @@ public final class GatewayV2 {
             lastInboundMessageAt = receivedAt;
             while (INCOMING.size() > MAX_INCOMING_MESSAGES) INCOMING.remove(0);
         }
+    }
+
+    private static String dedupKey(
+            String kind,
+            long workspaceId,
+            String senderId,
+            String stableId
+    ) {
+        return kind
+                + ':' + workspaceId
+                + ':' + senderId.length() + ':' + senderId
+                + ':' + stableId.length() + ':' + stableId;
     }
 
     private static void enqueueIncomingFile(
@@ -2313,6 +2660,31 @@ public final class GatewayV2 {
             );
             bundle.putInt("fragment_count", update.fragmentCount);
             DELIVERY.put(update.messageId, bundle);
+        }
+    }
+
+    private static final class SatelliteAttempt {
+        final List<Object> payloads;
+        final List<Integer> parcelIds;
+        final long timeoutMillis;
+
+        private SatelliteAttempt(
+                List<Object> payloads,
+                List<Integer> parcelIds,
+                long timeoutMillis
+        ) {
+            this.payloads = new ArrayList<>(payloads);
+            this.parcelIds = new ArrayList<>(parcelIds);
+            this.timeoutMillis = timeoutMillis;
+        }
+
+        static SatelliteAttempt of(Object payload, long timeoutMillis) throws Exception {
+            int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
+            return new SatelliteAttempt(
+                    Collections.singletonList(payload),
+                    Collections.singletonList(parcelId),
+                    timeoutMillis
+            );
         }
     }
 
