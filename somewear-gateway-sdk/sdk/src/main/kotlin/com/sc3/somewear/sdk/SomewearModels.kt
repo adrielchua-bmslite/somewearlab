@@ -42,6 +42,7 @@ public enum class SomewearErrorCode {
     FILE_UPLOAD_FAILED,
     FILE_DOWNLOAD_FAILED,
     PAYLOAD_TOO_LARGE_FOR_RADIO,
+    PAYLOAD_TOO_LARGE_FOR_SATELLITE,
     MALFORMED_RESPONSE,
     INTERNAL,
 }
@@ -248,6 +249,8 @@ public data class SendReceipt(
     val fragmentCount: Int = 1,
     val radioFragmented: Boolean = false,
     val satelliteFallbackArmed: Boolean = false,
+    val transportFragmented: Boolean = false,
+    val satelliteFragmented: Boolean = false,
 )
 
 public enum class DeliveryStatus {
@@ -360,6 +363,14 @@ public data class ReceiveHealth(
     val lastError: String?,
     val queuedIncomingCount: Int,
     val latestSequence: Long,
+    val inboundTransportFragmentCount: Long = 0L,
+    val completedTransportMessageCount: Long = 0L,
+    val invalidTransportFragmentCount: Long = 0L,
+    val activeTransportReassemblies: Int = 0,
+    val lastDeliveredChannel: DeviceChannel = DeviceChannel.UNKNOWN,
+    val lastPayloadStatus: String? = null,
+    val lastPayloadOutbound: Boolean? = null,
+    val lastPayloadParcelId: Int? = null,
 )
 
 public data class WorkspaceInfo(

@@ -27,7 +27,7 @@ For a complete transfer to another developer, follow [the handover guide](handov
 
 ## Verified status
 
-Gateway API v2 passed bidirectional Android contract tests for initialization, explicit routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, cancellation, and controlled Radio-to-Satellite handover. Gateway v13 queues only Radio first, atomically makes at most one Satellite-only attempt after a failed terminal state or timeout, uses an independent five-minute Satellite timeout by default, and suppresses late cross-channel duplicates. On two Android runtimes the signed APK armed fallback, changed delivery status from Radio to `SATELLITE`, accepted direct `SATELLITE_ONLY`, preserved inbound SC3 IDs/content, reduced two duplicate deliveries to one SDK message, and kept an explicitly canceled fallback `CANCELED` after its timer expired. The earlier v12 Radio fragmentation protections remain: checksummed ordinary Radio messages, distinct persisted timestamps, reverse-order reassembly, and a 60,000-byte stress case without a gateway/core crash. The API also exposes Node/satellite telemetry, mesh topology and signal quality, hardware settings, workspace QR enrollment, file/image transfer, and receive-health diagnostics.
+Gateway API v2 passed bidirectional Android contract tests for initialization, explicit routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, cancellation, and controlled Radio-to-Satellite handover. Gateway v14 keeps the v13 one-attempt fallback controls and adds independently deliverable Satellite fragmentation/reassembly. On two Android runtimes, 21-byte JSON remained one Satellite parcel; exact 504-byte RFT and 2,171-byte CAS JSON queued 5 and 18 Satellite parcels and reassembled through the provider/SDK into one message each, including reverse order. Receive health reported the Satellite channel, 28 fragment callbacks, three completed messages, zero invalid fragments, zero receive errors, and zero incomplete assemblies. The earlier Radio fragmentation protections remain, including checksummed ordinary messages, distinct persisted timestamps, reverse-order reassembly, and a 60,000-byte stress case without a gateway/core crash. The API also exposes Node/satellite telemetry, mesh topology and signal quality, hardware settings, workspace QR enrollment, file/image transfer, and receive-health diagnostics.
 
 Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, peer-radio delivery, and terminal over-air Satellite delivery still require provisioned Somewear Nodes for hardware acceptance testing.
 
@@ -35,7 +35,7 @@ Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, 
 
 - Kotlin AAR: `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
 - Local-AAR dependency block: `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts`
-- SDK AAR SHA-256: `6e3519c2180f020300266452641051f86dbd3674d085a3e6c58d9c2d0a85a30a`
+- SDK AAR SHA-256: `d2a309c9cf79e31133c596b34e958a065681c6201d4e75d675f78d7f316fd499`
 - Gateway base APK: `build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk`
 - Gateway ABI/configuration splits: the other four APKs in `build/signed-splits-v2/`.
 

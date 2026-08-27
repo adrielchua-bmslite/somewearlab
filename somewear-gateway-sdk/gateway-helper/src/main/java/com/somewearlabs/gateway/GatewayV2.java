@@ -100,6 +100,10 @@ public final class GatewayV2 {
     private static long invalidRadioFragmentCount;
     private static String lastPayloadType;
     private static String lastReceiveError;
+    private static String lastDeliveredChannel;
+    private static String lastPayloadStatus;
+    private static boolean lastPayloadOutbound;
+    private static int lastPayloadParcelId;
     private static Object compositePackager;
     private static Object fileRemoteSource;
 
@@ -239,6 +243,8 @@ public final class GatewayV2 {
                 "radio_fragment_dedup",
                 "radio_then_satellite",
                 "satellite_only",
+                "satellite_fragmentation",
+                "satellite_fragment_reassembly",
                 "satellite_timeout",
                 "delivery_status",
                 "message_cancel",
@@ -736,22 +742,30 @@ public final class GatewayV2 {
         } else {
             fallbackContent = null;
         }
-        String radioContent = fallback ? fallbackContent : content;
-        Object originalPayload = buildMessagePayload(radioContent, workspaceId);
+        String firstAttemptContent = fallback ? fallbackContent : content;
+        Object originalPayload = buildMessagePayload(firstAttemptContent, workspaceId);
         int originalTransmissionCount = approximateTransmissionCount(originalPayload);
-        if ("Radio".equals(channel)) {
-            Log.i(
-                    LOG_TAG,
-                    "Radio payload preflight; contentUtf8Bytes="
-                            + content.getBytes(StandardCharsets.UTF_8).length
-                            + "; transmissions=" + originalTransmissionCount
-            );
-        }
-        if ("Radio".equals(channel) && originalTransmissionCount > 1) {
+        Log.i(
+                LOG_TAG,
+                channel + " payload preflight; contentUtf8Bytes="
+                        + content.getBytes(StandardCharsets.UTF_8).length
+                        + "; transmissions=" + originalTransmissionCount
+        );
+        if (originalTransmissionCount > 1) {
             try {
-                payloads.addAll(buildRadioFragmentPayloads(messageId, content, workspaceId));
+                payloads.addAll(buildTransportFragmentPayloads(
+                        messageId,
+                        content,
+                        workspaceId,
+                        channel
+                ));
             } catch (IllegalArgumentException exception) {
-                return error("PAYLOAD_TOO_LARGE_FOR_RADIO", exception.getMessage());
+                return error(
+                        "Radio".equals(channel)
+                                ? "PAYLOAD_TOO_LARGE_FOR_RADIO"
+                                : "PAYLOAD_TOO_LARGE_FOR_SATELLITE",
+                        exception.getMessage()
+                );
             }
         } else {
             payloads.add(originalPayload);
@@ -763,7 +777,22 @@ public final class GatewayV2 {
                     fallbackContent,
                     workspaceId
             );
-            satelliteAttempt = SatelliteAttempt.of(satellitePayload, satelliteTimeout);
+            if (approximateTransmissionCount(satellitePayload) > 1) {
+                List<Object> satellitePayloads;
+                try {
+                    satellitePayloads = buildTransportFragmentPayloads(
+                            messageId,
+                            content,
+                            workspaceId,
+                            "Satellite"
+                    );
+                } catch (IllegalArgumentException exception) {
+                    return error("PAYLOAD_TOO_LARGE_FOR_SATELLITE", exception.getMessage());
+                }
+                satelliteAttempt = SatelliteAttempt.of(satellitePayloads, satelliteTimeout);
+            } else {
+                satelliteAttempt = SatelliteAttempt.of(satellitePayload, satelliteTimeout);
+            }
         }
 
         List<Integer> parcelIds = new ArrayList<>(payloads.size());
@@ -833,7 +862,12 @@ public final class GatewayV2 {
         result.putString("message_id", messageId);
         result.putInt("parcel_id", parcelIds.get(0));
         result.putInt("fragment_count", payloads.size());
-        result.putBoolean("radio_fragmented", payloads.size() > 1);
+        result.putBoolean("transport_fragmented", payloads.size() > 1);
+        result.putBoolean("radio_fragmented", "Radio".equals(channel) && payloads.size() > 1);
+        result.putBoolean(
+                "satellite_fragmented",
+                "Satellite".equals(channel) && payloads.size() > 1
+        );
         result.putBoolean("satellite_fallback_armed", fallbackArmed);
         if (fallback) result.putLong("satellite_timeout_ms", satelliteTimeout);
         result.putLong("accepted_at_ms", acceptedAt);
@@ -912,6 +946,9 @@ public final class GatewayV2 {
         );
         queued.putString("fallback_reason", reason);
         queued.putBoolean("satellite_fallback_started", true);
+        queued.putInt("fragment_count", attempt.payloads.size());
+        queued.putBoolean("transport_fragmented", attempt.payloads.size() > 1);
+        queued.putBoolean("satellite_fragmented", attempt.payloads.size() > 1);
         DELIVERY.put(decision.messageId, queued);
 
         try {
@@ -1070,10 +1107,11 @@ public final class GatewayV2 {
         }
     }
 
-    private static List<Object> buildRadioFragmentPayloads(
+    private static List<Object> buildTransportFragmentPayloads(
             String messageId,
             String content,
-            long workspaceId
+            long workspaceId,
+            String channel
     ) throws Exception {
         String transferId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         for (int chunkBytes = RadioMessageFraming.DEFAULT_CHUNK_BYTES;
@@ -1086,16 +1124,16 @@ public final class GatewayV2 {
                     chunkBytes
             );
             List<Object> payloads = new ArrayList<>(frames.size());
-            boolean everyFrameFitsRadio = true;
+            boolean everyFrameFitsOneTransmission = true;
             for (String frame : frames) {
                 Object payload = buildMessagePayload(frame, workspaceId);
                 if (approximateTransmissionCount(payload) != 1) {
-                    everyFrameFitsRadio = false;
+                    everyFrameFitsOneTransmission = false;
                     break;
                 }
                 payloads.add(payload);
             }
-            if (everyFrameFitsRadio) {
+            if (everyFrameFitsOneTransmission) {
                 RadioFragmentTimestamps.Reservation timestamps =
                         reserveRadioFragmentTimestamps(frames.size());
                 payloads.clear();
@@ -1108,7 +1146,7 @@ public final class GatewayV2 {
                 }
                 Log.i(
                         LOG_TAG,
-                        "Reserved duplicate-safe radio fragment timestamps; count="
+                        "Reserved duplicate-safe " + channel + " fragment timestamps; count="
                                 + frames.size()
                                 + "; firstEpochSecond=" + timestamps.firstEpochSecond
                                 + "; lastEpochSecond=" + timestamps.lastEpochSecond
@@ -1117,7 +1155,8 @@ public final class GatewayV2 {
             }
         }
         throw new IllegalArgumentException(
-                "The Somewear build cannot fit the SC3 radio-fragment header in one transmission"
+                "The Somewear build cannot fit the SC3 fragment header in one "
+                        + channel.toLowerCase(Locale.US) + " transmission"
         );
     }
 
@@ -1548,9 +1587,19 @@ public final class GatewayV2 {
             result.putLong("inbound_radio_fragment_count", inboundRadioFragmentCount);
             result.putLong("completed_radio_message_count", completedRadioMessageCount);
             result.putLong("invalid_radio_fragment_count", invalidRadioFragmentCount);
+            result.putLong("inbound_transport_fragment_count", inboundRadioFragmentCount);
+            result.putLong("completed_transport_message_count", completedRadioMessageCount);
+            result.putLong("invalid_transport_fragment_count", invalidRadioFragmentCount);
             result.putInt("active_radio_reassemblies", RADIO_REASSEMBLER.activeCount());
+            result.putInt("active_transport_reassemblies", RADIO_REASSEMBLER.activeCount());
             result.putString("last_payload_type", lastPayloadType);
             result.putString("last_receive_error", lastReceiveError);
+            if (lastDeliveredChannel != null) {
+                result.putString("last_delivered_channel", lastDeliveredChannel);
+                result.putString("last_payload_status", lastPayloadStatus);
+                result.putBoolean("last_payload_outbound", lastPayloadOutbound);
+                result.putInt("last_payload_parcel_id", lastPayloadParcelId);
+            }
             result.putInt("queued_incoming_count", INCOMING.size());
             result.putLong("latest_sequence", nextSequence - 1L);
         }
@@ -1578,7 +1627,12 @@ public final class GatewayV2 {
         long workspaceId = extras.getLong("workspace_id", 0L);
         if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
         long sourceUserId = extras.getLong("sender_id_long", 42L);
-        dispatchInboundTestContent(content, workspaceId, sourceUserId);
+        dispatchInboundTestContent(
+                content,
+                workspaceId,
+                sourceUserId,
+                testDeliveredChannel(extras)
+        );
         return ok("Test RouterPayload dispatched");
     }
 
@@ -1597,8 +1651,9 @@ public final class GatewayV2 {
                 RadioMessageFraming.DEFAULT_CHUNK_BYTES
         );
         if (extras.getBoolean("reverse_order", false)) Collections.reverse(frames);
+        String deliveredChannel = testDeliveredChannel(extras);
         for (String frame : frames) {
-            dispatchInboundTestContent(frame, workspaceId, sourceUserId);
+            dispatchInboundTestContent(frame, workspaceId, sourceUserId, deliveredChannel);
         }
         Bundle result = ok("Test framed RouterPayloads dispatched");
         result.putInt("fragment_count", frames.size());
@@ -1614,9 +1669,10 @@ public final class GatewayV2 {
         if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
         long sourceUserId = extras.getLong("sender_id_long", 42L);
         String framed = FallbackMessageEnvelope.encode(messageId, content);
-        dispatchInboundTestContent(framed, workspaceId, sourceUserId);
+        String deliveredChannel = testDeliveredChannel(extras);
+        dispatchInboundTestContent(framed, workspaceId, sourceUserId, deliveredChannel);
         if (extras.getBoolean("repeat_duplicate", false)) {
-            dispatchInboundTestContent(framed, workspaceId, sourceUserId);
+            dispatchInboundTestContent(framed, workspaceId, sourceUserId, deliveredChannel);
         }
         Bundle result = ok("Test fallback RouterPayload dispatched");
         result.putInt("dispatch_count", extras.getBoolean("repeat_duplicate", false) ? 2 : 1);
@@ -1642,15 +1698,36 @@ public final class GatewayV2 {
                 extras.getLong("file_size_bytes", 8_000_000L),
                 workspaceId
         );
-        dispatchInboundTestPayload(payload, workspaceId, sourceUserId);
+        dispatchInboundTestPayload(
+                payload,
+                workspaceId,
+                sourceUserId,
+                testDeliveredChannel(extras)
+        );
         return ok("Test FileMetadataPayload dispatched");
+    }
+
+    private static String testDeliveredChannel(Bundle extras) {
+        String raw = extras.getString("delivered_channel", "RADIO");
+        String normalized = raw == null ? "RADIO" : raw.trim().toUpperCase(Locale.US);
+        switch (normalized) {
+            case "RADIO":
+                return "Radio";
+            case "SATELLITE":
+                return "Satellite";
+            case "CELLULAR":
+                return "Cellular";
+            default:
+                throw new IllegalArgumentException("Unsupported test delivered_channel");
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void dispatchInboundTestContent(
             String content,
             long workspaceId,
-            long sourceUserId
+            long sourceUserId,
+            String deliveredChannel
     ) throws Exception {
         Class<?> messageClass = Class.forName(
                 "com.somewearlabs.somewearcore.api.MessagePayload"
@@ -1658,14 +1735,15 @@ public final class GatewayV2 {
         Object payload = messageClass
                 .getMethod("build", String.class, long.class)
                 .invoke(null, content, workspaceId);
-        dispatchInboundTestPayload(payload, workspaceId, sourceUserId);
+        dispatchInboundTestPayload(payload, workspaceId, sourceUserId, deliveredChannel);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private static void dispatchInboundTestPayload(
             Object payload,
             long workspaceId,
-            long sourceUserId
+            long sourceUserId,
+            String deliveredChannel
     ) throws Exception {
         Object oldInfo = invokeNoArgs(payload, "getRoutingInfo");
         Class<?> channelClass = Class.forName(
@@ -1674,7 +1752,10 @@ public final class GatewayV2 {
         Class<?> statusClass = Class.forName(
                 "com.somewearlabs.somewearshared.core.api.DevicePayloadStatus"
         );
-        Object channel = Enum.valueOf((Class<? extends Enum>) channelClass, "Radio");
+        Object channel = Enum.valueOf(
+                (Class<? extends Enum>) channelClass,
+                deliveredChannel
+        );
         Object status = Enum.valueOf((Class<? extends Enum>) statusClass, "Delivered");
         Object inboundInfo = findMethod(oldInfo.getClass(), "copy", 12).invoke(
                 oldInfo,
@@ -2367,6 +2448,12 @@ public final class GatewayV2 {
             String traceId = String.valueOf(invokeNoArgs(payload, "getTraceId"));
             int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
             long now = System.currentTimeMillis();
+            synchronized (LOCK) {
+                lastDeliveredChannel = channel;
+                lastPayloadStatus = status;
+                lastPayloadOutbound = outbound;
+                lastPayloadParcelId = parcelId;
+            }
 
             if (outbound) {
                 String errorReason = null;
@@ -2685,6 +2772,17 @@ public final class GatewayV2 {
                     Collections.singletonList(parcelId),
                     timeoutMillis
             );
+        }
+
+        static SatelliteAttempt of(List<Object> payloads, long timeoutMillis) throws Exception {
+            if (payloads.isEmpty()) {
+                throw new IllegalArgumentException("Satellite fallback payloads must not be empty");
+            }
+            List<Integer> parcelIds = new ArrayList<>(payloads.size());
+            for (Object payload : payloads) {
+                parcelIds.add(((Number) invokeNoArgs(payload, "getParcelId")).intValue());
+            }
+            return new SatelliteAttempt(payloads, parcelIds, timeoutMillis);
         }
     }
 

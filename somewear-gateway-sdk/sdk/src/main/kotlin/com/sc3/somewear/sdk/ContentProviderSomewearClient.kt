@@ -297,6 +297,14 @@ internal class ContentProviderSomewearClient(
                     SomewearGatewayContract.Key.SATELLITE_FALLBACK_ARMED,
                     false,
                 ),
+                transportFragmented = bundle.getBoolean(
+                    SomewearGatewayContract.Key.TRANSPORT_FRAGMENTED,
+                    false,
+                ),
+                satelliteFragmented = bundle.getBoolean(
+                    SomewearGatewayContract.Key.SATELLITE_FRAGMENTED,
+                    false,
+                ),
             )
         }
     }
@@ -584,6 +592,31 @@ internal class ContentProviderSomewearClient(
                     SomewearGatewayContract.Key.QUEUED_INCOMING_COUNT,
                 ),
                 latestSequence = bundle.getLong(SomewearGatewayContract.Key.LATEST_SEQUENCE),
+                inboundTransportFragmentCount = bundle.getLong(
+                    SomewearGatewayContract.Key.INBOUND_TRANSPORT_FRAGMENT_COUNT,
+                ),
+                completedTransportMessageCount = bundle.getLong(
+                    SomewearGatewayContract.Key.COMPLETED_TRANSPORT_MESSAGE_COUNT,
+                ),
+                invalidTransportFragmentCount = bundle.getLong(
+                    SomewearGatewayContract.Key.INVALID_TRANSPORT_FRAGMENT_COUNT,
+                ),
+                activeTransportReassemblies = bundle.getInt(
+                    SomewearGatewayContract.Key.ACTIVE_TRANSPORT_REASSEMBLIES,
+                ),
+                lastDeliveredChannel = enumValueOrUnknown(
+                    bundle.getString(SomewearGatewayContract.Key.LAST_DELIVERED_CHANNEL),
+                    DeviceChannel.UNKNOWN,
+                ),
+                lastPayloadStatus = bundle.getString(
+                    SomewearGatewayContract.Key.LAST_PAYLOAD_STATUS,
+                ),
+                lastPayloadOutbound = bundle.optionalBoolean(
+                    SomewearGatewayContract.Key.LAST_PAYLOAD_OUTBOUND,
+                ),
+                lastPayloadParcelId = bundle.optionalInt(
+                    SomewearGatewayContract.Key.LAST_PAYLOAD_PARCEL_ID,
+                ),
             )
         }
 
@@ -1093,6 +1126,8 @@ internal class ContentProviderSomewearClient(
             "FILE_UPLOAD_FAILED" -> SomewearErrorCode.FILE_UPLOAD_FAILED
             "FILE_DOWNLOAD_FAILED" -> SomewearErrorCode.FILE_DOWNLOAD_FAILED
             "PAYLOAD_TOO_LARGE_FOR_RADIO" -> SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO
+            "PAYLOAD_TOO_LARGE_FOR_SATELLITE" ->
+                SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_SATELLITE
             "MALFORMED_RESPONSE" -> SomewearErrorCode.MALFORMED_RESPONSE
             "NO_DEVICE_FOUND" -> SomewearErrorCode.USB_NO_DEVICE
             "NO_DEVICE_DRIVER_FOUND" -> SomewearErrorCode.USB_NO_DRIVER

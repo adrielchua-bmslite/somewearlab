@@ -4,8 +4,8 @@ Date: 2026-08-25
 
 ## Result
 
-The checked-in gateway v13 APK and Kotlin SDK implement
-`RADIO_THEN_SATELLITE`. The gateway sends only Radio first and permits exactly
+Gateway v13 introduced `RADIO_THEN_SATELLITE`; the current v14 APK and Kotlin
+SDK retain that behavior. The gateway sends only Radio first and permits exactly
 one Satellite-only attempt after an unsuccessful terminal Radio state or the
 caller-supplied Radio delivery timeout.
 

@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v13 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, radio-safe JSON fragmentation/reassembly, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
+The SDK exposes the complete SC3-facing contract. Gateway v14 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, radio/satellite-safe JSON fragmentation and reassembly, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -394,12 +394,13 @@ val request = SendRequest(
 val receipt = somewear.send(request)
 ```
 
-For `RADIO_ONLY`, gateway v12 measures the fully encoded Somewear package. If
-it exceeds one radio transmission, the gateway splits it into small ordinary
-`MessagePayload` records that all retain a Radio-only `SendOptions`. The peer
-gateway validates the checksum, accepts duplicate or out-of-order fragments,
-reassembles the original UTF-8 JSON, and emits one `IncomingMessage` with the
-original `messageId`.
+For `RADIO_ONLY` and `SATELLITE_ONLY`, gateway v14 measures the fully encoded
+Somewear package before queueing it. If it exceeds one transmission, the gateway
+splits it into small ordinary `MessagePayload` records. Every record retains a
+single-channel `SendOptions`: Radio only or Satellite only, according to the
+requested policy. The peer gateway validates the checksum, accepts duplicate or
+out-of-order fragments, reassembles the original UTF-8 JSON, and emits one
+`IncomingMessage` with the original `messageId`.
 
 The retained Somewear receiver considers messages with the same source and
 whole-second timestamp to be duplicates even when their bytes differ. Gateway
@@ -407,14 +408,24 @@ v12 therefore gives every fragment a distinct timestamp and persists the last
 reservation so timestamps are not reused after process restart. Generic Raw
 payloads are not used because the retained router removes Radio from that type.
 
-Both devices must run gateway v12 or newer for fragmented messages.
+Both devices must run gateway v14 or newer for Satellite-fragmented messages.
+Gateway v12 or newer remains sufficient for Radio-fragmented messages.
 Unfragmented small messages remain compatible with older gateways.
 
-`SendReceipt.fragmentCount` reports the number of ordinary radio messages
-queued, and `SendReceipt.radioFragmented` is true when this protection was
-used. The current bounded radio-framing limit is 64 KiB for the message ID plus
-content. A larger request returns
-`SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO` without enabling satellite.
+`SendReceipt.fragmentCount` reports the number of ordinary Somewear messages
+queued. `transportFragmented` reports any channel fragmentation;
+`radioFragmented` and `satelliteFragmented` identify the selected channel. The
+current bounded framing limit is 64 KiB for the message ID plus content. A
+larger request returns `PAYLOAD_TOO_LARGE_FOR_RADIO` or
+`PAYLOAD_TOO_LARGE_FOR_SATELLITE` without changing the route policy.
+
+Fragment counts are not expected to match the core's original transmission
+estimate. Each SC3 fragment has its own checksum and framing header so it can be
+delivered and retried independently. In the Android regression, the 504-byte
+RFT JSON queued five Satellite parcels and the 2,171-byte CAS JSON queued
+eighteen. This increases Satellite airtime/cost but avoids the broken one-parcel
+handoff. Compress application JSON where practical and reserve file/image APIs
+for binary data.
 
 Available policies:
 
@@ -443,12 +454,14 @@ val result = somewear.send(
 )
 ```
 
-Gateway v13 queues only Radio first. If every Radio parcel is delivered, it
+Gateway v14 queues only Radio first. If every Radio parcel is delivered, it
 removes the fallback. If the retained core reports an unsuccessful terminal
 state (`ERROR`, `CANCELED`, or `COLLAPSED`) or the radio delivery timer expires,
 the gateway atomically cancels the old Radio parcels and makes exactly one
-Satellite-only attempt. An explicit `cancelMessage()` removes the plan before
-canceling its parcels, so it never spends satellite later.
+Satellite-only attempt. If that Satellite package needs multiple transmissions,
+the attempt uses the same independently deliverable framing described above.
+An explicit `cancelMessage()` removes the plan before canceling its parcels, so
+it never spends satellite later.
 
 `SendReceipt.satelliteFallbackArmed` is true when the Radio attempt is active
 and a future Satellite attempt is armed. After handover,
@@ -458,7 +471,8 @@ the short Radio timeout.
 
 Both route attempts carry the SC3 `messageId`. The receiver keeps the first
 copy and suppresses a late duplicate from the other channel for 24 hours. Both
-devices must run gateway v13 for `RADIO_THEN_SATELLITE`; this does not change
+devices must run gateway v13 or newer for `RADIO_THEN_SATELLITE`; gateway v14
+is required if either attempt fragments over Satellite. This does not change
 the compatibility of ordinary unfragmented `RADIO_ONLY` messages.
 
 ### Delivery status
@@ -469,8 +483,8 @@ Read once:
 val result = somewear.deliveryStatus(messageId)
 ```
 
-Cancel all active Somewear parcels belonging to an SC3 message, including all
-parts of a fragmented radio message:
+Cancel all active Somewear parcels belonging to an SC3 message, including every
+part of a fragmented Radio or Satellite message:
 
 ```kotlin
 somewear.cancelMessage(messageId)
@@ -488,7 +502,7 @@ lifecycleScope.launch {
 
 Terminal states are `DELIVERED`, `ERROR`, `CANCELED`, and `COLLAPSED`. `deliveredChannel` reports the channel actually used, including Radio or Satellite.
 
-An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acceptance and `DeliveryUpdate` as delivery evidence. For a fragmented radio message, `DELIVERED` is reported only after every fragment is delivered; one fragment error fails the original SC3 message and identifies the failed fragment in `errorReason`.
+An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acceptance and `DeliveryUpdate` as delivery evidence. For a fragmented message, `DELIVERED` is reported only after every fragment is delivered; one fragment error fails the original SC3 message and identifies the failed fragment in `errorReason`.
 
 ### Incoming messages
 
@@ -517,6 +531,15 @@ lifecycleScope.launch {
 ```
 
 Persist the highest received sequence in SC3. Message UUIDs should also be deduplicated because a radio retry may redeliver application content.
+
+Use `receiveHealth()` when Satellite appears silent. A healthy fragmented
+Satellite receive ends with `lastDeliveredChannel=SATELLITE`,
+`lastPayloadOutbound=false`, `completedTransportMessageCount` incremented, and
+`activeTransportReassemblies=0`. If `routerCallbackCount` stays at zero, the
+gateway never received the downlink from the Node/core. If callbacks rise but
+`ignoredInboundCount` rises, inspect `lastPayloadType`: this SDK accepts SC3
+`MessagePayload` traffic, not ATAK `TakMessagePayload`/CoT traffic. If active
+reassemblies remain non-zero, one or more Satellite parcels have not arrived.
 
 Inspect the physical receive path without exposing message contents or keys:
 
@@ -806,7 +829,7 @@ Every method returns a `Bundle` with:
 | `disconnect` | none | common result |
 | `shutdown` | none | common result |
 | `powerOn` / `powerOff` | none | accepted connected-Node power command |
-| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms`, `satellite_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `radio_fragmented`, `satellite_fallback_armed`, `accepted_at_ms` |
+| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms`, `satellite_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `transport_fragmented`, `radio_fragmented`, `satellite_fragmented`, `satellite_fallback_armed`, `accepted_at_ms` |
 | `cancelMessage` | `message_id` | canceled fragment count |
 | `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
@@ -814,7 +837,7 @@ Every method returns a `Bundle` with:
 | `sendFileMetadata` | prepared file metadata, message ID, workspace, route policy, radio/satellite timeouts | parcel/message/file acceptance fields and `satellite_fallback_armed` |
 | `pollIncomingFiles` | `after_sequence`, `limit` | file-metadata `items: ArrayList<Bundle>` |
 | `getFileDownloadUrl` | `file_id`, `workspace_id` | internal signed-download ticket |
-| `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, queue, and last-event counters |
+| `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, transport-fragment/reassembly, queue, last channel/status/direction/parcel, and last-event counters |
 | `joinWorkspace` | `invite_code`, optional `workspace_timeout_ms` | joined workspace fields, `workspace_sync_completed` |
 | `syncWorkspaces` | optional `workspace_timeout_ms` | `workspaces: ArrayList<Bundle>` |
 | `getWorkspaceProvisioningStatus` | none | `authenticated`, `auth_state`, `workspace_count`, `has_active_workspace` |
@@ -842,7 +865,7 @@ are not logged, persisted, or exposed to UI code.
 
 ## Gateway compatibility
 
-| Capability | Gateway v13 | Validation/work remaining |
+| Capability | Gateway v14 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -853,6 +876,7 @@ are not logged, persisted, or exposed to UI code.
 | Factory reset with explicit confirmation | Yes | Retained device-management bridge verified on Android; destructive live-Node test intentionally not run |
 | Explicit radio/satellite `SendOptions` | Yes | Hardware validation |
 | Oversized JSON over Radio without Satellite | Yes | Unit tested; two Android runtimes queued eight distinct-timestamp Radio fragments for 932 bytes, normal/reverse-order reassembly passed, 60,000 bytes produced 469 fragments without a core crash, and restart persistence passed; post-fix physical peer-radio acceptance remains |
+| Oversized JSON over Satellite | Yes | Exact 504-byte RFT and 2,171-byte CAS payloads were queued as 5/18 Satellite parcels; normal/reverse-order provider→SDK reassembly passed on two Android runtimes with zero invalid/incomplete assemblies; clear-sky over-air acceptance remains |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
 | Delivery status and actual channel | Yes | Multi-fragment aggregation unit tested; live Node terminal acknowledgements require hardware validation |
 | Message cancellation | Yes | Fragment cancellation aggregation unit tested; live Node cancellation acknowledgement requires hardware validation |
@@ -875,7 +899,11 @@ Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back t
 4. Subscribe to `SomewearRouter.getPayload()` for inbound payloads and status updates.
 5. Export `RouterPayload.summaryStatus` and `RouterPayload.deliveredDeviceChannel`.
 6. Make `RADIO_ONLY` the safe default and never widen its channel set.
-7. Implement `RADIO_THEN_SATELLITE` as two serialized attempts: Radio first,
+7. Preflight the fully encoded package and create independently deliverable,
+   checksummed fragments whenever either selected channel needs more than one
+   transmission. Never hand a multi-transmission Satellite package to the core
+   as one opaque parcel.
+8. Implement `RADIO_THEN_SATELLITE` as two serialized attempts: Radio first,
    then at most one Satellite-only send after a failed terminal state or timer.
    Never pass `{Radio, Satellite}` to the retained core together.
 8. Split oversized Radio traffic above Somewear Core into ordinary `MessagePayload` records; never use the retained Radio `PackageType.Part` path.

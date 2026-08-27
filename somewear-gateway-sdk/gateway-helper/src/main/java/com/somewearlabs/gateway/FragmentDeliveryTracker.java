@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Aggregates multiple ordinary radio parcels into one SC3 delivery result. */
+/** Aggregates multiple ordinary transport parcels into one SC3 delivery result. */
 final class FragmentDeliveryTracker {
     private final Map<Integer, Part> partsByParcel = new LinkedHashMap<>();
     private final Map<String, Transfer> transfersByMessage = new LinkedHashMap<>();
@@ -45,7 +45,7 @@ final class FragmentDeliveryTracker {
         if (isFailure(part.status)) {
             transfer.terminal = true;
             String detail = errorReason == null || errorReason.trim().isEmpty()
-                    ? "Somewear rejected a radio fragment"
+                    ? "Somewear rejected a message fragment"
                     : errorReason;
             Update update = new Update(
                     transfer.messageId,

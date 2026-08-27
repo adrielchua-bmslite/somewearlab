@@ -131,7 +131,9 @@ public object SomewearGatewayContract {
         public const val SATELLITE_TIMEOUT_MS: String = "satellite_timeout_ms"
         public const val PARCEL_ID: String = "parcel_id"
         public const val FRAGMENT_COUNT: String = "fragment_count"
+        public const val TRANSPORT_FRAGMENTED: String = "transport_fragmented"
         public const val RADIO_FRAGMENTED: String = "radio_fragmented"
+        public const val SATELLITE_FRAGMENTED: String = "satellite_fragmented"
         public const val SATELLITE_FALLBACK_ARMED: String = "satellite_fallback_armed"
         public const val ACCEPTED_AT_MS: String = "accepted_at_ms"
 
@@ -169,6 +171,18 @@ public object SomewearGatewayContract {
         public const val LAST_RECEIVE_ERROR: String = "last_receive_error"
         public const val QUEUED_INCOMING_COUNT: String = "queued_incoming_count"
         public const val LATEST_SEQUENCE: String = "latest_sequence"
+        public const val INBOUND_TRANSPORT_FRAGMENT_COUNT: String =
+            "inbound_transport_fragment_count"
+        public const val COMPLETED_TRANSPORT_MESSAGE_COUNT: String =
+            "completed_transport_message_count"
+        public const val INVALID_TRANSPORT_FRAGMENT_COUNT: String =
+            "invalid_transport_fragment_count"
+        public const val ACTIVE_TRANSPORT_REASSEMBLIES: String =
+            "active_transport_reassemblies"
+        public const val LAST_DELIVERED_CHANNEL: String = "last_delivered_channel"
+        public const val LAST_PAYLOAD_STATUS: String = "last_payload_status"
+        public const val LAST_PAYLOAD_OUTBOUND: String = "last_payload_outbound"
+        public const val LAST_PAYLOAD_PARCEL_ID: String = "last_payload_parcel_id"
 
         public const val INVITE_CODE: String = "invite_code"
         public const val WORKSPACE_TIMEOUT_MS: String = "workspace_timeout_ms"

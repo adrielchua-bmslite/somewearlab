@@ -20,8 +20,9 @@ import java.util.zip.CRC32;
  *
  * <p>Every encoded frame is sent as an ordinary Somewear MessagePayload. This is
  * deliberately separate from Somewear's PackageType.Part mechanism because the
- * retained core forces those parts to Satellite and ignores radio composite
- * children on receive.</p>
+ * retained core does not preserve the caller's route reliably for composite
+ * children. The historical SC3R1 prefix is retained for wire compatibility, but
+ * these frames are valid on both Radio and Satellite.</p>
  */
 final class RadioMessageFraming {
     static final String PREFIX = "\u001eSC3R1|";
@@ -43,17 +44,17 @@ final class RadioMessageFraming {
         Objects.requireNonNull(content, "content");
         validateTransferId(transferId);
         if (chunkBytes < MIN_CHUNK_BYTES || chunkBytes > DEFAULT_CHUNK_BYTES) {
-            throw new IllegalArgumentException("Unsupported radio fragment size");
+            throw new IllegalArgumentException("Unsupported transport fragment size");
         }
 
         byte[] messageIdBytes = messageId.getBytes(StandardCharsets.UTF_8);
         byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
         if (messageIdBytes.length == 0 || messageIdBytes.length > MAX_MESSAGE_ID_BYTES) {
-            throw new IllegalArgumentException("message_id is too large for radio framing");
+            throw new IllegalArgumentException("message_id is too large for transport framing");
         }
         int wireLength = 2 + messageIdBytes.length + contentBytes.length;
         if (wireLength > MAX_WIRE_BYTES) {
-            throw new IllegalArgumentException("Message is too large for radio framing");
+            throw new IllegalArgumentException("Message is too large for transport framing");
         }
 
         byte[] wire = new byte[wireLength];
@@ -64,7 +65,7 @@ final class RadioMessageFraming {
 
         int count = (wire.length + chunkBytes - 1) / chunkBytes;
         if (count < 1 || count > MAX_FRAGMENTS) {
-            throw new IllegalArgumentException("Message requires too many radio fragments");
+            throw new IllegalArgumentException("Message requires too many transport fragments");
         }
         String countText = Integer.toString(count, 36);
         String checksum = Long.toString(checksum(wire), 36);
@@ -200,7 +201,7 @@ final class RadioMessageFraming {
     }
 }
 
-/** Bounded, duplicate-safe and out-of-order-safe receiver for SC3 radio frames. */
+/** Bounded, duplicate-safe and out-of-order-safe receiver for SC3 transport frames. */
 final class RadioMessageReassembler {
     private static final long ASSEMBLY_TTL_MS = 10 * 60_000L;
     private static final int MAX_ACTIVE_ASSEMBLIES = 64;

@@ -222,11 +222,14 @@ public final class Main {
         if (!helperSource.contains("radio_then_satellite")
                 || !helperSource.contains("satellite_timeout")
                 || !helperSource.contains("satellite_timeout_ms")
+                || !helperSource.contains("satellite_fragmentation")
+                || !helperSource.contains("satellite_fragment_reassembly")
+                || !helperSource.contains("buildTransportFragmentPayloads")
                 || !helperSource.contains("ROUTE_FALLBACKS")
                 || !helperSource.contains("performFallbackLocked")
                 || !helperSource.contains("sendOptions(\"Satellite\"")) {
             throw new IllegalStateException(
-                    "GatewayV2 must implement controlled Radio-to-Satellite fallback"
+                    "GatewayV2 must implement controlled fallback and Satellite fragmentation"
             );
         }
         if (!helperSource.contains("if (\"listWorkspaces\".equals(method)) return listWorkspaces()")
@@ -335,6 +338,7 @@ public final class Main {
         String sendRequestSymbols = null;
         String fileSendRequestSymbols = null;
         String sendReceiptSymbols = null;
+        String receiveHealthSymbols = null;
         String manifest;
         try (ZipFile archive = new ZipFile(aar.toFile())) {
             ZipEntry classesJar = archive.getEntry("classes.jar");
@@ -362,6 +366,9 @@ public final class Main {
                     }
                     if ("com/sc3/somewear/sdk/SendReceipt.class".equals(entry.getName())) {
                         sendReceiptSymbols = classBytes;
+                    }
+                    if ("com/sc3/somewear/sdk/ReceiveHealth.class".equals(entry.getName())) {
+                        receiveHealthSymbols = classBytes;
                     }
                     if (classBytes.contains("com/google/mlkit")
                             || classBytes.contains("androidx/camera")) {
@@ -399,11 +406,16 @@ public final class Main {
         if (sendRequestSymbols == null
                 || fileSendRequestSymbols == null
                 || sendReceiptSymbols == null
+                || receiveHealthSymbols == null
                 || !sendRequestSymbols.contains("satelliteTimeoutMillis")
                 || !fileSendRequestSymbols.contains("satelliteTimeoutMillis")
-                || !sendReceiptSymbols.contains("satelliteFallbackArmed")) {
+                || !sendReceiptSymbols.contains("satelliteFallbackArmed")
+                || !sendReceiptSymbols.contains("transportFragmented")
+                || !sendReceiptSymbols.contains("satelliteFragmented")
+                || !receiveHealthSymbols.contains("inboundTransportFragmentCount")
+                || !receiveHealthSymbols.contains("lastDeliveredChannel")) {
             throw new IllegalStateException(
-                    "SDK AAR is missing the Radio-to-Satellite timeout/receipt contract"
+                    "SDK AAR is missing the Satellite fragmentation/receive contract"
             );
         }
         List<String> requiredMethods = List.of(
@@ -440,6 +452,9 @@ public final class Main {
         boolean deduplicator = false;
         boolean capability = false;
         boolean timeout = false;
+        boolean satelliteFragmentation = false;
+        boolean satelliteReassembly = false;
+        boolean satelliteReceipt = false;
         try (ZipFile archive = new ZipFile(apk.toFile())) {
             var entries = archive.entries();
             while (entries.hasMoreElements()) {
@@ -454,14 +469,24 @@ public final class Main {
                 deduplicator |= dex.contains("Lcom/somewearlabs/gateway/InboundDeduplicator;");
                 capability |= dex.contains("radio_then_satellite");
                 timeout |= dex.contains("satellite_timeout_ms");
+                satelliteFragmentation |= dex.contains("satellite_fragmentation");
+                satelliteReassembly |= dex.contains("satellite_fragment_reassembly");
+                satelliteReceipt |= dex.contains("satellite_fragmented");
             }
         }
-        if (!coordinator || !envelope || !deduplicator || !capability || !timeout) {
+        if (!coordinator
+                || !envelope
+                || !deduplicator
+                || !capability
+                || !timeout
+                || !satelliteFragmentation
+                || !satelliteReassembly
+                || !satelliteReceipt) {
             throw new IllegalStateException(
-                    "base APK is missing the controlled Radio-to-Satellite implementation"
+                    "base APK is missing controlled fallback or Satellite fragmentation"
             );
         }
-        System.out.println("gateway_radio_satellite_contract=OK");
+        System.out.println("gateway_radio_satellite_fragment_contract=OK");
     }
 
     private static void resign(

@@ -45,6 +45,12 @@ public class RadioMessageFramingTest {
     }
 
     @Test
+    public void satelliteFramesPreserveRftAndCasSizedJson() {
+        assertSatelliteRoundTrip("rft-message", jsonPayloadOfWireSize(504));
+        assertSatelliteRoundTrip("cas-message", jsonPayloadOfWireSize(2171));
+    }
+
+    @Test
     public void duplicateFragmentIsIdempotent() {
         List<String> frames = RadioMessageFraming.split(
                 "message-id",
@@ -106,7 +112,7 @@ public class RadioMessageFramingTest {
     }
 
     @Test(expected = IllegalArgumentException.class)
-    public void rejectsOversizedRadioMessage() {
+    public void rejectsOversizedTransportMessage() {
         RadioMessageFraming.split(
                 "message-id",
                 "x".repeat(RadioMessageFraming.MAX_WIRE_BYTES),
@@ -128,5 +134,40 @@ public class RadioMessageFramingTest {
         assertEquals(0, frame.index);
         assertEquals(frames.size(), frame.count);
         assertArrayEquals(frame.data, frame.data.clone());
+    }
+
+    private static void assertSatelliteRoundTrip(String messageId, String json) {
+        assertEquals(json.length(), json.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+        List<String> frames = RadioMessageFraming.split(
+                messageId,
+                json,
+                TRANSFER_ID,
+                RadioMessageFraming.DEFAULT_CHUNK_BYTES
+        );
+        assertTrue(frames.size() > 1);
+
+        RadioMessageReassembler reassembler = new RadioMessageReassembler();
+        RadioMessageReassembler.Result result = null;
+        for (int index = 0; index < frames.size(); index++) {
+            result = reassembler.accept(
+                    frames.get(index),
+                    75603L,
+                    "satellite-sender",
+                    "SATELLITE",
+                    2_000L + index
+            );
+        }
+
+        assertNotNull(result);
+        assertEquals(RadioMessageReassembler.Result.Kind.COMPLETE, result.kind);
+        assertEquals(messageId, result.messageId);
+        assertEquals(json, result.content);
+        assertEquals(0, reassembler.activeCount());
+    }
+
+    private static String jsonPayloadOfWireSize(int size) {
+        String prefix = "{\"data\":\"";
+        String suffix = "\"}";
+        return prefix + "x".repeat(size - prefix.length() - suffix.length()) + suffix;
     }
 }
