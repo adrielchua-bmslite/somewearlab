@@ -2,6 +2,15 @@
 
 Date: 2026-08-27
 
+> Superseded by gateway v15. A physical field test on 2026-08-28 showed that
+> five of six independently queued SC3 Satellite frames reached the Somewear
+> website after 5–10+ minutes, one frame was missing, the website could not
+> reconstruct the SC3 framing, and the peer SDK correctly withheld the
+> incomplete message. This proved v14's emulator-only reassembly test but
+> invalidated application-level Satellite fragmentation as the deployment
+> architecture. Gateway v15 uses the retained core's native Satellite composite
+> protocol instead.
+
 ## Result
 
 Gateway v14 no longer hands an oversized SC3 JSON message to the retained core

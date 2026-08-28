@@ -305,6 +305,18 @@ internal class ContentProviderSomewearClient(
                     SomewearGatewayContract.Key.SATELLITE_FRAGMENTED,
                     false,
                 ),
+                estimatedTransmissionCount = bundle.getInt(
+                    SomewearGatewayContract.Key.ESTIMATED_TRANSMISSION_COUNT,
+                    1,
+                ),
+                satelliteNativeComposite = bundle.getBoolean(
+                    SomewearGatewayContract.Key.SATELLITE_NATIVE_COMPOSITE,
+                    false,
+                ),
+                backhaulAckRequired = bundle.getBoolean(
+                    SomewearGatewayContract.Key.BACKHAUL_ACK_REQUIRED,
+                    false,
+                ),
             )
         }
     }
@@ -479,6 +491,34 @@ internal class ContentProviderSomewearClient(
                         ),
                         satelliteFallbackArmed = result.getBoolean(
                             SomewearGatewayContract.Key.SATELLITE_FALLBACK_ARMED,
+                            false,
+                        ),
+                        fragmentCount = result.getInt(
+                            SomewearGatewayContract.Key.FRAGMENT_COUNT,
+                            1,
+                        ),
+                        radioFragmented = result.getBoolean(
+                            SomewearGatewayContract.Key.RADIO_FRAGMENTED,
+                            false,
+                        ),
+                        transportFragmented = result.getBoolean(
+                            SomewearGatewayContract.Key.TRANSPORT_FRAGMENTED,
+                            false,
+                        ),
+                        satelliteFragmented = result.getBoolean(
+                            SomewearGatewayContract.Key.SATELLITE_FRAGMENTED,
+                            false,
+                        ),
+                        estimatedTransmissionCount = result.getInt(
+                            SomewearGatewayContract.Key.ESTIMATED_TRANSMISSION_COUNT,
+                            1,
+                        ),
+                        satelliteNativeComposite = result.getBoolean(
+                            SomewearGatewayContract.Key.SATELLITE_NATIVE_COMPOSITE,
+                            false,
+                        ),
+                        backhaulAckRequired = result.getBoolean(
+                            SomewearGatewayContract.Key.BACKHAUL_ACK_REQUIRED,
                             false,
                         ),
                     ),

@@ -27,7 +27,7 @@ For a complete transfer to another developer, follow [the handover guide](handov
 
 ## Verified status
 
-Gateway API v2 passed bidirectional Android contract tests for initialization, explicit routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, cancellation, and controlled Radio-to-Satellite handover. Gateway v14 keeps the v13 one-attempt fallback controls and adds independently deliverable Satellite fragmentation/reassembly. On two Android runtimes, 21-byte JSON remained one Satellite parcel; exact 504-byte RFT and 2,171-byte CAS JSON queued 5 and 18 Satellite parcels and reassembled through the provider/SDK into one message each, including reverse order. Receive health reported the Satellite channel, 28 fragment callbacks, three completed messages, zero invalid fragments, zero receive errors, and zero incomplete assemblies. The earlier Radio fragmentation protections remain, including checksummed ordinary messages, distinct persisted timestamps, reverse-order reassembly, and a 60,000-byte stress case without a gateway/core crash. The API also exposes Node/satellite telemetry, mesh topology and signal quality, hardware settings, workspace QR enrollment, file/image transfer, and receive-health diagnostics.
+Gateway API v2 passed bidirectional Android contract tests for initialization, explicit routing, inbound polling/Flow delivery, message-ID preservation, delivery lookup, cancellation, and controlled Radio-to-Satellite handover. Gateway v15 corrects the v14 Satellite transport architecture: oversized Satellite sends now remain one parent `MessagePayload`, allowing the retained Somewear `CompositePackager` and `PostOffice` to split and reassemble native `Part` records. Every Satellite send requires the retained backhaul acknowledgement flag, so Node handoff alone is not reported as sufficient. SC3 framing remains enabled only for Radio, where the retained core explicitly does not accept composite children. On two clean Android emulator installations, exact 504-byte RFT and 2,171-byte CAS JSON each produced one parent receipt with native estimates of 2 and 8 transmissions, respectively, and acknowledgement enabled. Legacy v14 Satellite frames can still be received during handover. The API also exposes Node/satellite telemetry, mesh topology and signal quality, hardware settings, workspace QR enrollment, file/image transfer, and receive-health diagnostics.
 
 Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, peer-radio delivery, and terminal over-air Satellite delivery still require provisioned Somewear Nodes for hardware acceptance testing.
 
@@ -35,7 +35,7 @@ Physical Bluetooth/USB connection, live setting acknowledgements/factory reset, 
 
 - Kotlin AAR: `somewear-gateway-sdk/dist/somewear-gateway-sdk-0.1.0.aar`
 - Local-AAR dependency block: `somewear-gateway-sdk/dist/sc3-somewear.gradle.kts`
-- SDK AAR SHA-256: `d2a309c9cf79e31133c596b34e958a065681c6201d4e75d675f78d7f316fd499`
+- SDK AAR SHA-256: `bb3d47ba27bc428f1d60a453c73635f0301f77b6c37ddf0d5c86f34dcffa2b3d`
 - Gateway base APK: `build/signed-splits-v2/com.somewearlabs.swtak.plugin.apk`
 - Gateway ABI/configuration splits: the other four APKs in `build/signed-splits-v2/`.
 

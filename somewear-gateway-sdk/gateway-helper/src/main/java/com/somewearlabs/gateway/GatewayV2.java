@@ -243,8 +243,9 @@ public final class GatewayV2 {
                 "radio_fragment_dedup",
                 "radio_then_satellite",
                 "satellite_only",
-                "satellite_fragmentation",
-                "satellite_fragment_reassembly",
+                "satellite_native_composite",
+                "satellite_backhaul_ack",
+                "satellite_fragment_reassembly_legacy",
                 "satellite_timeout",
                 "delivery_status",
                 "message_cancel",
@@ -751,7 +752,7 @@ public final class GatewayV2 {
                         + content.getBytes(StandardCharsets.UTF_8).length
                         + "; transmissions=" + originalTransmissionCount
         );
-        if (originalTransmissionCount > 1) {
+        if (TransportFragmentationPolicy.shouldFragment(channel, originalTransmissionCount)) {
             try {
                 payloads.addAll(buildTransportFragmentPayloads(
                         messageId,
@@ -777,22 +778,11 @@ public final class GatewayV2 {
                     fallbackContent,
                     workspaceId
             );
-            if (approximateTransmissionCount(satellitePayload) > 1) {
-                List<Object> satellitePayloads;
-                try {
-                    satellitePayloads = buildTransportFragmentPayloads(
-                            messageId,
-                            content,
-                            workspaceId,
-                            "Satellite"
-                    );
-                } catch (IllegalArgumentException exception) {
-                    return error("PAYLOAD_TOO_LARGE_FOR_SATELLITE", exception.getMessage());
-                }
-                satelliteAttempt = SatelliteAttempt.of(satellitePayloads, satelliteTimeout);
-            } else {
-                satelliteAttempt = SatelliteAttempt.of(satellitePayload, satelliteTimeout);
-            }
+            satelliteAttempt = SatelliteAttempt.of(
+                    satellitePayload,
+                    satelliteTimeout,
+                    approximateTransmissionCount(satellitePayload)
+            );
         }
 
         List<Integer> parcelIds = new ArrayList<>(payloads.size());
@@ -867,6 +857,15 @@ public final class GatewayV2 {
         result.putBoolean(
                 "satellite_fragmented",
                 "Satellite".equals(channel) && payloads.size() > 1
+        );
+        result.putInt("estimated_transmission_count", originalTransmissionCount);
+        result.putBoolean(
+                "satellite_native_composite",
+                "Satellite".equals(channel) && originalTransmissionCount > 1
+        );
+        result.putBoolean(
+                "backhaul_ack_required",
+                TransportFragmentationPolicy.requiresBackhaulAck(channel)
         );
         result.putBoolean("satellite_fallback_armed", fallbackArmed);
         if (fallback) result.putLong("satellite_timeout_ms", satelliteTimeout);
@@ -949,6 +948,11 @@ public final class GatewayV2 {
         queued.putInt("fragment_count", attempt.payloads.size());
         queued.putBoolean("transport_fragmented", attempt.payloads.size() > 1);
         queued.putBoolean("satellite_fragmented", attempt.payloads.size() > 1);
+        queued.putInt("estimated_transmission_count", attempt.estimatedTransmissionCount);
+        queued.putBoolean(
+                "satellite_native_composite",
+                attempt.estimatedTransmissionCount > 1
+        );
         DELIVERY.put(decision.messageId, queued);
 
         try {
@@ -1172,7 +1176,11 @@ public final class GatewayV2 {
         Set<?> channelIntent = Collections.singleton(channelValue);
         invoke(options, "setChannelIntent", channelIntent);
         invoke(options, "setAllowBackhaul", false);
-        invoke(options, "setRequiresBackhaulAck", false);
+        invoke(
+                options,
+                "setRequiresBackhaulAck",
+                TransportFragmentationPolicy.requiresBackhaulAck(channel)
+        );
         invoke(options, "setTimeout", (int) Math.max(1L, Math.min(Integer.MAX_VALUE, timeout)));
         return options;
     }
@@ -1429,6 +1437,7 @@ public final class GatewayV2 {
                 fileSize,
                 workspaceId
         );
+        int originalTransmissionCount = approximateTransmissionCount(payload);
         SatelliteAttempt satelliteAttempt = null;
         if (fallback) {
             Object satellitePayload = buildFileMetadataPayload(
@@ -1441,9 +1450,13 @@ public final class GatewayV2 {
                     fileSize,
                     workspaceId
             );
-            satelliteAttempt = SatelliteAttempt.of(satellitePayload, satelliteTimeout);
+            satelliteAttempt = SatelliteAttempt.of(
+                    satellitePayload,
+                    satelliteTimeout,
+                    approximateTransmissionCount(satellitePayload)
+            );
         }
-        if ("Radio".equals(channel) && approximateTransmissionCount(payload) != 1) {
+        if ("Radio".equals(channel) && originalTransmissionCount != 1) {
             return error(
                     "PAYLOAD_TOO_LARGE_FOR_RADIO",
                     "The file metadata is too large for one radio transmission; shorten the file name"
@@ -1513,6 +1526,16 @@ public final class GatewayV2 {
         result.putString("file_name", fileName);
         result.putString("mime_type", mimeType);
         result.putLong("file_size_bytes", fileSize);
+        result.putInt("fragment_count", 1);
+        result.putInt("estimated_transmission_count", originalTransmissionCount);
+        result.putBoolean(
+                "satellite_native_composite",
+                "Satellite".equals(channel) && originalTransmissionCount > 1
+        );
+        result.putBoolean(
+                "backhaul_ack_required",
+                TransportFragmentationPolicy.requiresBackhaulAck(channel)
+        );
         result.putBoolean("satellite_fallback_armed", fallbackArmed);
         if (fallback) result.putLong("satellite_timeout_ms", satelliteTimeout);
         return result;
@@ -2754,35 +2777,32 @@ public final class GatewayV2 {
         final List<Object> payloads;
         final List<Integer> parcelIds;
         final long timeoutMillis;
+        final int estimatedTransmissionCount;
 
         private SatelliteAttempt(
                 List<Object> payloads,
                 List<Integer> parcelIds,
-                long timeoutMillis
+                long timeoutMillis,
+                int estimatedTransmissionCount
         ) {
             this.payloads = new ArrayList<>(payloads);
             this.parcelIds = new ArrayList<>(parcelIds);
             this.timeoutMillis = timeoutMillis;
+            this.estimatedTransmissionCount = estimatedTransmissionCount;
         }
 
-        static SatelliteAttempt of(Object payload, long timeoutMillis) throws Exception {
+        static SatelliteAttempt of(
+                Object payload,
+                long timeoutMillis,
+                int estimatedTransmissionCount
+        ) throws Exception {
             int parcelId = ((Number) invokeNoArgs(payload, "getParcelId")).intValue();
             return new SatelliteAttempt(
                     Collections.singletonList(payload),
                     Collections.singletonList(parcelId),
-                    timeoutMillis
+                    timeoutMillis,
+                    estimatedTransmissionCount
             );
-        }
-
-        static SatelliteAttempt of(List<Object> payloads, long timeoutMillis) throws Exception {
-            if (payloads.isEmpty()) {
-                throw new IllegalArgumentException("Satellite fallback payloads must not be empty");
-            }
-            List<Integer> parcelIds = new ArrayList<>(payloads.size());
-            for (Object payload : payloads) {
-                parcelIds.add(((Number) invokeNoArgs(payload, "getParcelId")).intValue());
-            }
-            return new SatelliteAttempt(payloads, parcelIds, timeoutMillis);
         }
     }
 

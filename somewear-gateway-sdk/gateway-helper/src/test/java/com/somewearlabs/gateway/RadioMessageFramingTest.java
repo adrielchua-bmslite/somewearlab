@@ -45,7 +45,7 @@ public class RadioMessageFramingTest {
     }
 
     @Test
-    public void satelliteFramesPreserveRftAndCasSizedJson() {
+    public void legacySatelliteFramesStillPreserveRftAndCasSizedJson() {
         assertSatelliteRoundTrip("rft-message", jsonPayloadOfWireSize(504));
         assertSatelliteRoundTrip("cas-message", jsonPayloadOfWireSize(2171));
     }

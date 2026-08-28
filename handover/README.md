@@ -190,13 +190,13 @@ for every send.
 Use `RADIO_ONLY` by default. When the operator explicitly approves Satellite
 fallback, use `RADIO_THEN_SATELLITE` with separate budgets such as
 `radioTimeoutMillis = 30_000L` and `satelliteTimeoutMillis = 300_000L`.
-Gateway v14 queues only Radio first and makes at most one Satellite-only attempt
+Gateway v15 queues only Radio first and makes at most one Satellite-only attempt
 after an unsuccessful terminal Radio state or timeout. Observe
 `satelliteFallbackArmed` and `deliveryStatus(messageId).deliveredChannel`.
 Calling `cancelMessage(messageId)` disarms a pending fallback before canceling
-the Radio parcels. Oversized `SATELLITE_ONLY` and fallback messages are divided
-into independently deliverable Satellite parcels and reassembled by gateway
-v14 on the receiving device.
+the Radio parcels. Oversized `SATELLITE_ONLY` and fallback messages remain one
+parent `MessagePayload`; the retained Somewear core divides and reassembles its
+native Satellite parts before gateway v15 exposes the parent to SC3.
 
 For images/documents, call `sendFile(FileSendRequest)` with an Android content
 URI. The SDK streams the file to a Somewear signed upload URL, then sends only
@@ -237,7 +237,7 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | `UNSUPPORTED` | The gateway lacks that API-v2 capability. | Check `info().capabilities`; do not fall back to legacy all-channel sending. |
 | `SEND_FAILED` | Neither the initial Radio attempt nor the controlled Satellite fallback could be queued. | Confirm the Node is connected, Satellite is enabled/provisioned, and retry only under operator policy. |
 | `PAYLOAD_TOO_LARGE_FOR_RADIO` | The message exceeds the v12 bounded radio-framing limit or cannot fit its framing header in one Node transmission. | Reduce/compress the application payload or use an explicitly approved transport; the gateway will not silently enable satellite. |
-| `PAYLOAD_TOO_LARGE_FOR_SATELLITE` | The message exceeds the bounded Satellite-framing limit or the core cannot fit one SC3 frame in one Satellite transmission. | Reduce/compress the application JSON. For binary content, use `sendFile()` instead of embedding bytes/base64 in JSON. |
+| `PAYLOAD_TOO_LARGE_FOR_SATELLITE` | A legacy gateway or retained-core payload limit rejected the request. Gateway v15 does not SC3-fragment new Satellite messages. | Confirm both sides use v15, reduce/compress the JSON, and use `sendFile()` instead of embedding bytes/base64. |
 | `INVALID_INVITE` | The QR/pasted invite is malformed, expired, revoked, or rejected. | Scan a newly issued Somewear workspace invite and submit it once. Do not log it. |
 | `NETWORK_UNAVAILABLE` or `TIMEOUT` | Workspace join/sync could not reach the Somewear service. | Restore internet access and retry the same operator-approved operation. |
 | `ENVIRONMENT_MISMATCH` | The invite targets a different Somewear backend. | Obtain an invite for the deployed environment; do not silently change production/gov/custom endpoints. |
@@ -255,11 +255,11 @@ Call `somewear.syncWorkspaces()` to force remote synchronization on an existing 
 | File call returns `FILE_READ_FAILED` | SC3 lost URI permission or the picker URI cannot be reopened. | Retain URI permission when applicable and keep the URI readable until `sendFile()` completes. |
 | File call returns `FILE_UPLOAD_FAILED` or `FILE_DOWNLOAD_FAILED` | The signed-ticket request, data connection, HTTP transfer, or destination URI failed. | Confirm Somewear authentication/workspace membership, phone data access, and URI access; retry under application policy. |
 | Connected but no incoming messages and no error | An older gateway had no receive-lifetime service and swallowed router callback exceptions, or SC3 is not collecting `incomingMessages()`. | Update both AAR and all five gateway splits. Start the Flow before peer transmission and inspect `receiveHealth()`: zero callbacks points to Node/workspace/radio delivery; ignored callbacks indicate a non-`MessagePayload`; queued messages point to an SC3 cursor/UI issue. |
-| Small text works but larger JSON changes to Satellite or returns `ChannelDisabled` | The installed gateway predates v11 and allowed the retained Somewear composite path to rewrite split parts to Satellite. | Update the AAR and re-sign/reinstall all five prepared v14 gateway splits on both devices. Confirm `info().capabilities` contains `radio_fragmentation`. |
-| Sender reports every fragment delivered over Radio, but the receiver exposes only the first two and reports no SDK error | Gateway v11 used the same whole-second timestamp for every `MessagePayload`, so the retained receiver discarded fragment three onward as duplicates. | Install/re-sign the prepared v14 split set on both devices and confirm `info().capabilities` contains `radio_fragment_dedup`. Do not substitute Raw/DataPayload; this retained router removes Radio from Raw traffic. |
-| Satellite logs show `parcels=1` for RFT/CAS-sized JSON | The base APK predates gateway v14. It estimated multiple core transmissions but handed them over as one opaque Satellite parcel. | Update the AAR and re-sign/reinstall all five v14 splits on both devices. Confirm `info().capabilities` contains `satellite_fragmentation` and the send receipt reports `satelliteFragmented=true` with `fragmentCount > 1`. |
-| Satellite callbacks arrive but SC3 receives nothing | The peer is older than gateway v14, one fragment is missing, or the downlink is ATAK `TakMessagePayload` instead of SC3 `MessagePayload`. | Inspect `receiveHealth()`. `lastDeliveredChannel=SATELLITE` with active reassemblies means parcels are incomplete; rising ignored count identifies unsupported payload types. Install v14 on both SC3 peers and send SDK `MessagePayload` traffic. |
-| `RADIO_THEN_SATELLITE` returns `UNSUPPORTED` | The base APK predates gateway v13 even if the AAR exposes the enum. | Re-sign/reinstall all five prepared v14 splits and confirm `info().capabilities` contains `radio_then_satellite` and `satellite_timeout`. |
+| Small text works but larger JSON changes to Satellite or returns `ChannelDisabled` | The installed gateway predates v11 and allowed the retained Somewear composite path to rewrite split parts to Satellite. | Update the AAR and re-sign/reinstall all five prepared v15 gateway splits on both devices. Confirm `info().capabilities` contains `radio_fragmentation`. |
+| Sender reports every fragment delivered over Radio, but the receiver exposes only the first two and reports no SDK error | Gateway v11 used the same whole-second timestamp for every `MessagePayload`, so the retained receiver discarded fragment three onward as duplicates. | Install/re-sign the prepared v15 split set on both devices and confirm `info().capabilities` contains `radio_fragment_dedup`. Do not substitute Raw/DataPayload; this retained router removes Radio from Raw traffic. |
+| Website receives only 5/6 fragments and the peer phone receives nothing | Gateway v14 incorrectly sent oversized Satellite JSON as independent SC3 `MessagePayload` frames. One lost frame blocked checksum-safe reassembly, and the website had no SC3 reassembler. | Install v15 on both phones. Confirm `info().capabilities` contains `satellite_native_composite` and `satellite_backhaul_ack`. An oversized Satellite receipt must show `fragmentCount=1`, `satelliteNativeComposite=true`, `backhaulAckRequired=true`, and `estimatedTransmissionCount > 1`; the website should receive the reconstructed parent JSON, not `SC3R1` frames. |
+| Satellite parent remains queued or the peer phone receives nothing | The native Somewear composite has not reached a terminal uplink/downlink state, the peers differ in workspace/environment, or the downlink is ATAK `TakMessagePayload` instead of SC3 `MessagePayload`. | Observe `deliveryStatus()` until terminal and inspect `receiveHealth()`. Zero receiver callbacks means the retained core has not completed the native parent. Rising ignored count identifies an unsupported payload type. Capture both phones' logs and website timestamps for physical acceptance. |
+| `RADIO_THEN_SATELLITE` returns `UNSUPPORTED` | The base APK predates gateway v13 even if the AAR exposes the enum. | Re-sign/reinstall all five prepared v15 splits and confirm `info().capabilities` contains `radio_then_satellite` and `satellite_timeout`. |
 
 ## Operational limitations
 

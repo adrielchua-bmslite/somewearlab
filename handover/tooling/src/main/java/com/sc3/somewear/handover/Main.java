@@ -5,6 +5,8 @@ import com.android.apksig.ApkVerifier;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,11 +19,11 @@ import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.HashSet;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
 import java.util.zip.ZipEntry;
@@ -154,6 +156,10 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/InboundDeduplicator.java"
         );
+        Path transportPolicy = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/TransportFragmentationPolicy.java"
+        );
         Path scanner = repoRoot.resolve(
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/WorkspaceQrScannerActivity.java"
@@ -178,6 +184,7 @@ public final class Main {
         );
         requireFile(provider, "gateway provider patch");
         requireFile(helper, "gateway v2 helper");
+        requireFile(transportPolicy, "gateway transport policy");
         requireFile(fallbackCoordinator, "radio-to-satellite fallback coordinator");
         requireFile(fallbackEnvelope, "fallback message envelope");
         requireFile(inboundDeduplicator, "cross-channel inbound deduplicator");
@@ -222,14 +229,17 @@ public final class Main {
         if (!helperSource.contains("radio_then_satellite")
                 || !helperSource.contains("satellite_timeout")
                 || !helperSource.contains("satellite_timeout_ms")
-                || !helperSource.contains("satellite_fragmentation")
-                || !helperSource.contains("satellite_fragment_reassembly")
+                || !helperSource.contains("satellite_native_composite")
+                || !helperSource.contains("satellite_backhaul_ack")
+                || !helperSource.contains("satellite_fragment_reassembly_legacy")
                 || !helperSource.contains("buildTransportFragmentPayloads")
+                || !helperSource.contains("TransportFragmentationPolicy.shouldFragment")
+                || !helperSource.contains("TransportFragmentationPolicy.requiresBackhaulAck")
                 || !helperSource.contains("ROUTE_FALLBACKS")
                 || !helperSource.contains("performFallbackLocked")
                 || !helperSource.contains("sendOptions(\"Satellite\"")) {
             throw new IllegalStateException(
-                    "GatewayV2 must implement controlled fallback and Satellite fragmentation"
+                    "GatewayV2 must implement controlled fallback and native Satellite composites"
             );
         }
         if (!helperSource.contains("if (\"listWorkspaces\".equals(method)) return listWorkspaces()")
@@ -412,10 +422,13 @@ public final class Main {
                 || !sendReceiptSymbols.contains("satelliteFallbackArmed")
                 || !sendReceiptSymbols.contains("transportFragmented")
                 || !sendReceiptSymbols.contains("satelliteFragmented")
+                || !sendReceiptSymbols.contains("estimatedTransmissionCount")
+                || !sendReceiptSymbols.contains("satelliteNativeComposite")
+                || !sendReceiptSymbols.contains("backhaulAckRequired")
                 || !receiveHealthSymbols.contains("inboundTransportFragmentCount")
                 || !receiveHealthSymbols.contains("lastDeliveredChannel")) {
             throw new IllegalStateException(
-                    "SDK AAR is missing the Satellite fragmentation/receive contract"
+                    "SDK AAR is missing the Satellite transport/read-back contract"
             );
         }
         List<String> requiredMethods = List.of(
@@ -452,41 +465,124 @@ public final class Main {
         boolean deduplicator = false;
         boolean capability = false;
         boolean timeout = false;
-        boolean satelliteFragmentation = false;
-        boolean satelliteReassembly = false;
-        boolean satelliteReceipt = false;
+        boolean satelliteNativeComposite = false;
+        boolean satelliteBackhaulAck = false;
+        boolean legacySatelliteReassembly = false;
+        boolean transmissionEstimate = false;
+        boolean providerClass = false;
+        boolean gatewayV2Class = false;
         try (ZipFile archive = new ZipFile(apk.toFile())) {
             var entries = archive.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
                 if (!entry.getName().matches("classes[0-9]*\\.dex")) continue;
-                String dex = new String(
-                        archive.getInputStream(entry).readAllBytes(),
-                        StandardCharsets.ISO_8859_1
+                byte[] dexBytes = archive.getInputStream(entry).readAllBytes();
+                String dex = new String(dexBytes, StandardCharsets.ISO_8859_1);
+                Set<String> definedClasses = dexClassDescriptors(dexBytes);
+                providerClass |= definedClasses.contains(
+                        "Lcom/somewearlabs/gateway/SomewearGatewayProvider;"
+                );
+                gatewayV2Class |= definedClasses.contains(
+                        "Lcom/somewearlabs/gateway/GatewayV2;"
                 );
                 coordinator |= dex.contains("Lcom/somewearlabs/gateway/RouteFallbackCoordinator;");
                 envelope |= dex.contains("Lcom/somewearlabs/gateway/FallbackMessageEnvelope;");
                 deduplicator |= dex.contains("Lcom/somewearlabs/gateway/InboundDeduplicator;");
                 capability |= dex.contains("radio_then_satellite");
                 timeout |= dex.contains("satellite_timeout_ms");
-                satelliteFragmentation |= dex.contains("satellite_fragmentation");
-                satelliteReassembly |= dex.contains("satellite_fragment_reassembly");
-                satelliteReceipt |= dex.contains("satellite_fragmented");
+                satelliteNativeComposite |= dex.contains("satellite_native_composite");
+                satelliteBackhaulAck |= dex.contains("satellite_backhaul_ack");
+                legacySatelliteReassembly |= dex.contains(
+                        "satellite_fragment_reassembly_legacy"
+                );
+                transmissionEstimate |= dex.contains("estimated_transmission_count");
             }
         }
-        if (!coordinator
+        if (!providerClass
+                || !gatewayV2Class
+                || !coordinator
                 || !envelope
                 || !deduplicator
                 || !capability
                 || !timeout
-                || !satelliteFragmentation
-                || !satelliteReassembly
-                || !satelliteReceipt) {
+                || !satelliteNativeComposite
+                || !satelliteBackhaulAck
+                || !legacySatelliteReassembly
+                || !transmissionEstimate) {
             throw new IllegalStateException(
-                    "base APK is missing controlled fallback or Satellite fragmentation"
+                    "base APK is missing its provider/helper class definition, controlled fallback,"
+                            + " or native Satellite composite contract"
             );
         }
-        System.out.println("gateway_radio_satellite_fragment_contract=OK");
+        System.out.println("gateway_radio_satellite_transport_contract=OK");
+    }
+
+    /** Returns the class descriptors that are defined, rather than merely referenced, by a DEX. */
+    private static Set<String> dexClassDescriptors(byte[] dex) {
+        if (dex.length < 0x70
+                || dex[0] != 'd'
+                || dex[1] != 'e'
+                || dex[2] != 'x'
+                || dex[3] != '\n') {
+            throw new IllegalStateException("invalid DEX header in base APK");
+        }
+        ByteBuffer buffer = ByteBuffer.wrap(dex).order(ByteOrder.LITTLE_ENDIAN);
+        int stringIdsSize = positiveDexValue(buffer.getInt(0x38), "string_ids_size");
+        int stringIdsOffset = positiveDexValue(buffer.getInt(0x3c), "string_ids_off");
+        int typeIdsSize = positiveDexValue(buffer.getInt(0x40), "type_ids_size");
+        int typeIdsOffset = positiveDexValue(buffer.getInt(0x44), "type_ids_off");
+        int classDefsSize = positiveDexValue(buffer.getInt(0x60), "class_defs_size");
+        int classDefsOffset = positiveDexValue(buffer.getInt(0x64), "class_defs_off");
+        requireDexRange(dex, stringIdsOffset, stringIdsSize, 4, "string IDs");
+        requireDexRange(dex, typeIdsOffset, typeIdsSize, 4, "type IDs");
+        requireDexRange(dex, classDefsOffset, classDefsSize, 32, "class definitions");
+
+        Set<String> descriptors = new HashSet<>();
+        for (int index = 0; index < classDefsSize; index++) {
+            int classIndex = buffer.getInt(classDefsOffset + index * 32);
+            if (classIndex < 0 || classIndex >= typeIdsSize) {
+                throw new IllegalStateException("invalid DEX class index");
+            }
+            int descriptorIndex = buffer.getInt(typeIdsOffset + classIndex * 4);
+            if (descriptorIndex < 0 || descriptorIndex >= stringIdsSize) {
+                throw new IllegalStateException("invalid DEX descriptor index");
+            }
+            int stringOffset = buffer.getInt(stringIdsOffset + descriptorIndex * 4);
+            descriptors.add(readDexString(dex, stringOffset));
+        }
+        return descriptors;
+    }
+
+    private static int positiveDexValue(int value, String field) {
+        if (value < 0) throw new IllegalStateException("invalid DEX " + field);
+        return value;
+    }
+
+    private static void requireDexRange(
+            byte[] dex,
+            int offset,
+            int count,
+            int itemSize,
+            String label
+    ) {
+        long end = (long) offset + (long) count * itemSize;
+        if (offset < 0 || count < 0 || end > dex.length) {
+            throw new IllegalStateException("invalid DEX " + label + " range");
+        }
+    }
+
+    private static String readDexString(byte[] dex, int offset) {
+        if (offset < 0 || offset >= dex.length) {
+            throw new IllegalStateException("invalid DEX string offset");
+        }
+        int cursor = offset;
+        do {
+            if (cursor >= dex.length) throw new IllegalStateException("truncated DEX string length");
+        } while ((dex[cursor++] & 0x80) != 0);
+        int start = cursor;
+        while (cursor < dex.length && dex[cursor] != 0) cursor++;
+        if (cursor == dex.length) throw new IllegalStateException("unterminated DEX string");
+        return new String(dex, start, cursor - start, StandardCharsets.UTF_8);
     }
 
     private static void resign(

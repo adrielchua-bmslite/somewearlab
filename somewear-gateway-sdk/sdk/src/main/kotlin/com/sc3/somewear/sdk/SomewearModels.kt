@@ -251,6 +251,12 @@ public data class SendReceipt(
     val satelliteFallbackArmed: Boolean = false,
     val transportFragmented: Boolean = false,
     val satelliteFragmented: Boolean = false,
+    /** Estimated low-speed transmissions for the original parent payload. */
+    val estimatedTransmissionCount: Int = 1,
+    /** True when Somewear Core, rather than SC3 framing, owns Satellite splitting/reassembly. */
+    val satelliteNativeComposite: Boolean = false,
+    /** True when the Node must receive server/backhaul confirmation for this route. */
+    val backhaulAckRequired: Boolean = false,
 )
 
 public enum class DeliveryStatus {

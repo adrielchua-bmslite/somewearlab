@@ -134,6 +134,9 @@ public object SomewearGatewayContract {
         public const val TRANSPORT_FRAGMENTED: String = "transport_fragmented"
         public const val RADIO_FRAGMENTED: String = "radio_fragmented"
         public const val SATELLITE_FRAGMENTED: String = "satellite_fragmented"
+        public const val ESTIMATED_TRANSMISSION_COUNT: String = "estimated_transmission_count"
+        public const val SATELLITE_NATIVE_COMPOSITE: String = "satellite_native_composite"
+        public const val BACKHAUL_ACK_REQUIRED: String = "backhaul_ack_required"
         public const val SATELLITE_FALLBACK_ARMED: String = "satellite_fallback_armed"
         public const val ACCEPTED_AT_MS: String = "accepted_at_ms"
 

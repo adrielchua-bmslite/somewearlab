@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v14. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v15. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -30,9 +30,11 @@
 - assigns every transport fragment a persisted, distinct whole-second timestamp so
   the retained receiver's message duplicate query does not discard different
   fragments that were queued during the same second.
-- applies the same one-transmission-per-parcel framing to oversized
-  `SATELLITE_ONLY` JSON and Satellite fallback attempts, then reassembles
-  inbound Radio or Satellite frames into one SC3 message.
+- leaves oversized `SATELLITE_ONLY` JSON and Satellite fallback attempts as one
+  parent `MessagePayload`. The retained core's native `CompositePackager` owns
+  Satellite `Part` splitting and `PostOffice` reassembles the parent before the
+  gateway callback. Every Satellite send requires the retained backhaul ACK
+  flag. Legacy v14 Satellite frames remain receive-compatible.
 - implements `RADIO_THEN_SATELLITE` as one Radio attempt followed by at most one
   Satellite-only attempt after an unsuccessful terminal status or timeout;
   Satellite has its own timeout and explicit SC3 cancellation disarms fallback.

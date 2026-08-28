@@ -22,7 +22,9 @@ import java.util.zip.CRC32;
  * deliberately separate from Somewear's PackageType.Part mechanism because the
  * retained core does not preserve the caller's route reliably for composite
  * children. The historical SC3R1 prefix is retained for wire compatibility, but
- * these frames are valid on both Radio and Satellite.</p>
+ * these frames remain readable on both Radio and Satellite for v14 handover
+ * compatibility. New Satellite sends use the retained core's native composite
+ * transport instead.</p>
  */
 final class RadioMessageFraming {
     static final String PREFIX = "\u001eSC3R1|";
