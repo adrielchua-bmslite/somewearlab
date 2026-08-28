@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v16 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, authenticated workspace file catalogues, SDK-owned missing-file recovery, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, SC3 Radio fragmentation, native Somewear Satellite composite transport, legacy v14 Satellite-frame receive compatibility, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
+The SDK exposes the complete SC3-facing contract. Gateway v17 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, revisioned variable-size file-batch manifests, authenticated workspace file catalogues, SDK-owned missing-file recovery, durable selective Radio-fragment recovery and peer completion acknowledgement, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, SC3 Radio fragmentation, native Somewear Satellite composite transport, legacy v14 Satellite-frame receive compatibility, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -31,12 +31,16 @@ telemetry, and two-emulator regression evidence and the remaining physical/cloud
 acceptance boundary.
 
 See [`WORKSPACE_CONTENT_SYNC_TEST_REPORT.md`](WORKSPACE_CONTENT_SYNC_TEST_REPORT.md)
-for the v16 catalogue, selective recovery, atomic large-download tests, rebuilt
+for the v17 catalogue, selective recovery, atomic large-download tests, rebuilt
 artifact verification, and live authenticated acceptance boundary.
 
 See [`RADIO_SATELLITE_FALLBACK_TEST_REPORT.md`](RADIO_SATELLITE_FALLBACK_TEST_REPORT.md)
 for the route-state race tests, two-emulator APK evidence, duplicate suppression,
 cancellation result, and remaining over-air acceptance boundary.
+
+See [`RELIABLE_TRANSFER_TEST_REPORT.md`](RELIABLE_TRANSFER_TEST_REPORT.md) for
+the v17 durable fragment recovery, peer acknowledgement, variable file-batch,
+hash verification, and two-emulator restart-style evidence.
 
 ## Requirements
 
@@ -398,7 +402,7 @@ val request = SendRequest(
 val receipt = somewear.send(request)
 ```
 
-Gateway v15 measures the fully encoded Somewear package before queueing it, but
+Gateway v17 measures the fully encoded Somewear package before queueing it, but
 the responsible fragmentation layer depends on the route:
 
 - `RADIO_ONLY`: SC3 splits an oversized message into checksummed ordinary
@@ -510,7 +514,41 @@ lifecycleScope.launch {
 
 Terminal states are `DELIVERED`, `ERROR`, `CANCELED`, and `COLLAPSED`. `deliveredChannel` reports the channel actually used, including Radio or Satellite.
 
-An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acceptance and `DeliveryUpdate` as delivery evidence. For SC3-fragmented Radio, `DELIVERED` is reported only after every SC3 fragment is delivered. For native-composite Satellite, the retained core emits the parent terminal status after its children complete or fail.
+An accepted send is not proof of peer delivery. Treat `SendReceipt` as queue acceptance and `DeliveryUpdate` as Node/service delivery evidence. For SC3-fragmented Radio, `DELIVERED` is reported only after every SC3 fragment is delivered. `receiverConfirmed=true` is stronger: the peer v17 gateway rebuilt and accepted the complete logical message. For native-composite Satellite, the retained core emits the parent terminal status after its children complete or fail.
+
+### Reliable fragmented Radio messages
+
+Gateway v17 keeps each outbound fragmented Radio message in its app-private
+journal for up to 24 hours. The receiving gateway also journals every valid
+fragment before reassembly. After a quiet period it automatically sends compact
+Radio requests containing only the missing indexes; the sender selectively
+requeues those retained fragments. When reassembly succeeds, the receiver sends
+a completion acknowledgement and the sender removes its retained copy.
+
+Normal SC3 code does not need to drive that loop. It can expose progress and an
+operator retry button with these APIs:
+
+```kotlin
+val pending = somewear.listIncompleteMessageTransfers()
+
+// Receiver: ask immediately instead of waiting for the next automatic round.
+somewear.requestMissingMessageFragments(transferId)
+
+// Sender: resend all retained fragments for this logical message.
+somewear.retryFragmentedMessage(messageId)
+```
+
+`SendReceipt.transferId` and `receiverAcknowledgementAvailable` are populated
+only for SC3-fragmented Radio sends. Read `DeliveryUpdate.receiverConfirmed` for
+peer reassembly confirmation. `receiveHealth()` also exposes recovery-request,
+retransmission, peer-acknowledgement, and recovery-error counters.
+
+This selective request protocol is for v17-to-v17 SC3 Radio framing. Satellite
+native `Part` records remain private to Somewear Core, so the SDK cannot request
+one missing Satellite child. For a terminal Satellite failure, SC3 must make an
+operator-approved retry of the complete logical message. The file-batch API
+below uses the workspace catalogue instead of message fragments and can recover
+individual missing files by ID.
 
 ### Incoming messages
 
@@ -629,6 +667,75 @@ when (val downloaded = somewear.downloadFile(incomingFile, destinationUri)) {
     is SomewearResult.Failure -> showError(downloaded.error)
 }
 ```
+
+#### Tell the receiver how many files belong to one operation
+
+Use `sendFileBatch()` when several files form one logical report. The list is
+variable-size; `5` is not hard-coded. The SDK uploads every file first and then
+uploads and announces one authoritative manifest last. That manifest contains:
+
+- `batchId` and `revision`;
+- `expectedFileCount`;
+- each file's zero-based index, Somewear `fileId`, name, MIME type, byte count,
+  and SHA-256 hash;
+- `finalRevision`, which tells SC3 whether the sender plans a later complete
+  revision for the same batch ID.
+
+Sender example with five files (the same call accepts more):
+
+```kotlin
+val result = somewear.sendFileBatch(
+    FileBatchSendRequest(
+        workspaceId = workspaceId,
+        files = selectedUris.map { uri ->
+            FileBatchItemRequest(sourceUri = uri)
+        },
+        routePolicy = RoutePolicy.RADIO_ONLY,
+    ),
+)
+
+if (result is SomewearResult.Success) {
+    check(result.value.manifest.expectedFileCount == selectedUris.size)
+    saveBatchId(result.value.manifest.batchId)
+}
+```
+
+On the receiver, ordinary file announcements may arrive in any order. The
+manifest announcement is identified by `IncomingFile.isFileBatchManifest`.
+Reading it tells SC3 the exact expected set, and reconciliation uses the remote
+workspace catalogue so a missed Radio/Satellite announcement does not lose the
+file:
+
+```kotlin
+lifecycleScope.launch {
+    somewear.incomingFiles(afterSequence = lastFileSequence).collect { incoming ->
+        if (!incoming.isFileBatchManifest) return@collect
+
+        when (val decoded = somewear.readFileBatchManifest(incoming)) {
+            is SomewearResult.Failure -> showError(decoded.error)
+            is SomewearResult.Success -> {
+                val manifest = decoded.value
+                val state = somewear.reconcileFileBatch(manifest)
+                renderExpectedCount(manifest.expectedFileCount)
+                renderBatchState(state)
+
+                somewear.syncFileBatch(manifest).collect { event ->
+                    renderContentSync(event)
+                }
+            }
+        }
+    }
+}
+```
+
+`reconcileFileBatch()` reports exact remote `missingFileIds` and locally
+verified `cachedFileIds`. `syncFileBatch()` downloads only the manifest IDs,
+retries with fresh signed tickets, and verifies both size and SHA-256 before an
+atomic publish. A manifest can be found later through `listWorkspaceFiles()` by
+its MIME type `application/vnd.sc3.file-batch+json`, even if its channel
+announcement was missed. Each higher revision is a complete replacement list,
+not an unbounded delta; receivers should keep the highest revision seen for a
+`batchId`.
 
 Missing a Radio/Satellite metadata announcement no longer makes a cloud file
 undiscoverable. Read the authenticated workspace catalogue directly:
@@ -852,8 +959,9 @@ File-specific errors are:
 - `FILE_LIST_FAILED`: the authenticated workspace catalogue could not be read.
 - `FILE_UPLOAD_FAILED`: the upload ticket or signed-URL PUT failed.
 - `FILE_DOWNLOAD_FAILED`: the download ticket, GET, or destination URI failed.
-- `FILE_INTEGRITY_FAILED`: the completed byte count did not match Somewear metadata.
+- `FILE_INTEGRITY_FAILED`: the completed byte count or manifest SHA-256 did not match.
 - `FILE_CACHE_FAILED`: the SDK could not update its app-private catalogue/cache.
+- `FRAGMENT_RECOVERY_FAILED`: the private Radio recovery journal was unavailable.
 
 ## Low-level gateway IPC contract
 
@@ -906,16 +1014,19 @@ Every method returns a `Bundle` with:
 | `disconnect` | none | common result |
 | `shutdown` | none | common result |
 | `powerOn` / `powerOff` | none | accepted connected-Node power command |
-| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms`, `satellite_timeout_ms` | `message_id`, optional `parcel_id`, `fragment_count`, `transport_fragmented`, `radio_fragmented`, `satellite_fragmented`, `estimated_transmission_count`, `satellite_native_composite`, `backhaul_ack_required`, `satellite_fallback_armed`, `accepted_at_ms` |
+| `sendMessageV2` | `message_id`, `message`, `workspace_id`, optional `target_user_id`, `route_policy`, `radio_timeout_ms`, `satellite_timeout_ms` | `message_id`, optional `parcel_id`/`transfer_id`, `receiver_ack_available`, fragment/transport fields, `satellite_fallback_armed`, `accepted_at_ms` |
 | `cancelMessage` | `message_id` | canceled fragment count |
-| `getDeliveryStatus` | `message_id` | `delivery_status`, `delivered_channel`, optional `error_reason`, `updated_at_ms` |
+| `getDeliveryStatus` | `message_id` | delivery/channel/error/time plus `receiver_confirmed` and optional confirmation time |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
+| `listIncompleteMessageTransfers` | none | incomplete Radio transfers with counts, exact missing indexes, and request state |
+| `requestMissingMessageFragments` | `transfer_id` | requested fragment count and recovery round |
+| `retryFragmentedMessage` | `message_id` | retained transfer ID and requeued fragment count |
 | `prepareFileUpload` | name, MIME, SHA-256, byte count, workspace | internal signed-upload ticket and file metadata |
 | `sendFileMetadata` | prepared file metadata, message ID, workspace, route policy, radio/satellite timeouts | parcel/message/file acceptance fields and `satellite_fallback_armed` |
 | `pollIncomingFiles` | `after_sequence`, `limit` | file-metadata `items: ArrayList<Bundle>` |
 | `listWorkspaceFiles` | `workspace_id`, `offset`, `limit` | bounded file-metadata page, `total_count`, `next_offset` |
 | `getFileDownloadUrl` | `file_id`, `workspace_id` | internal signed-download ticket |
-| `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, transport-fragment/reassembly, queue, last channel/status/direction/parcel, and last-event counters |
+| `getReceiveHealth` | none | subscription, receive/reassembly/queue state, last event, recovery request/retransmit/peer-ack/error counters |
 | `joinWorkspace` | `invite_code`, optional `workspace_timeout_ms` | joined workspace fields, `workspace_sync_completed` |
 | `syncWorkspaces` | optional `workspace_timeout_ms` | `workspaces: ArrayList<Bundle>` |
 | `getWorkspaceProvisioningStatus` | none | `authenticated`, `auth_state`, `workspace_count`, `has_active_workspace` |
@@ -943,7 +1054,7 @@ are not logged, persisted, or exposed to UI code.
 
 ## Gateway compatibility
 
-| Capability | Gateway v16 | Validation/work remaining |
+| Capability | Gateway v17 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -953,7 +1064,7 @@ are not logged, persisted, or exposed to UI code.
 | Read/update Node hardware settings | Yes | Retained settings types and disconnected safety validated on Android; live Node acknowledgement still requires hardware acceptance |
 | Factory reset with explicit confirmation | Yes | Retained device-management bridge verified on Android; destructive live-Node test intentionally not run |
 | Explicit radio/satellite `SendOptions` | Yes | Hardware validation |
-| Oversized JSON over Radio without Satellite | Yes | Unit tested; two Android runtimes queued eight distinct-timestamp Radio fragments for 932 bytes, normal/reverse-order reassembly passed, 60,000 bytes produced 469 fragments without a core crash, and restart persistence passed; post-fix physical peer-radio acceptance remains |
+| Oversized JSON over Radio without Satellite | Yes | Durable journal/protocol unit tested; two v17 Android runtimes each omitted one fragment, cleared volatile assembly state, restored/reassembled the exact JSON from the journal, delivered it once, and removed the incomplete record; physical peer-radio acceptance remains |
 | Oversized JSON over Satellite | Yes | On two clean Android emulator installations, exact 504-byte RFT and 2,171-byte CAS JSON each queued one acknowledged native parent with estimates of 2/8 transmissions; clear-sky website and peer-phone acceptance remains |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
 | Delivery status and actual channel | Yes | Multi-fragment aggregation unit tested; live Node terminal acknowledgements require hardware validation |
@@ -962,7 +1073,7 @@ are not logged, persisted, or exposed to UI code.
 | Mesh-network snapshot | Yes | Empty-state Android validation passed; live peer RSSI/topology requires hardware validation |
 | File/image metadata receive | Yes | Native 25 MB and 50 MB image metadata records parsed and polled as Radio on two Android runtimes without transferring bytes through Binder |
 | File/image upload and download | Yes | SDK/gateway build and signed-ticket paths implemented; live authenticated Somewear service upload/download remains account acceptance testing |
-| Workspace file catalogue and selective recovery | Yes | Gateway/AAR artifact contract verified; selective-ID planning, bounded retry, atomic 2 MiB download, truncation rejection, and offline catalogue cache unit tested; live authenticated `GetFiles` acceptance remains |
+| Workspace file catalogue, batches, and selective recovery | Yes | Variable 17-file manifest round trip passed on two Android runtimes; exact-ID planning, bounded retry, atomic 2 MiB download, truncation/hash rejection, and offline catalogue cache unit tested; live authenticated service acceptance remains |
 | Automatic radio-then-satellite fallback | Yes | Race/timeout/cancel/dedup unit tested; the signed APK queued Radio then Satellite on two Android runtimes and exposed `SATELLITE` delivery status; live over-air terminal delivery still requires provisioned Nodes |
 | QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |
@@ -989,9 +1100,10 @@ Unsupported calls return `SomewearErrorCode.UNSUPPORTED`; they never fall back t
    child. Do not enable unbounded automatic Satellite retry; expose failure so
    SC3 can request an operator-approved retry.
 10. Split oversized Radio traffic above Somewear Core into ordinary `MessagePayload` records; never use the retained Radio `PackageType.Part` path.
-11. Keep USB/Bluetooth permissions and connection ownership in the gateway package.
-12. Run long-lived connection and inbound collection work from a foreground or bound service. The ContentProvider may remain as the command/polling compatibility surface.
-13. Do not export authentication secrets, traffic keys, or mesh-key bytes through IPC.
+11. Persist SC3 Radio fragments privately, request only missing indexes, and retain outbound frames until peer acknowledgement or bounded expiry.
+12. Keep USB/Bluetooth permissions and connection ownership in the gateway package.
+13. Run long-lived connection and inbound collection work from a foreground or bound service. The ContentProvider may remain as the command/polling compatibility surface.
+14. Do not export authentication secrets, traffic keys, or mesh-key bytes through IPC.
 
 ## Security and deployment
 

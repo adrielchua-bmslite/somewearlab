@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
 
 internal class ContentProviderSomewearClient(
@@ -320,6 +321,11 @@ internal class ContentProviderSomewearClient(
                     SomewearGatewayContract.Key.BACKHAUL_ACK_REQUIRED,
                     false,
                 ),
+                transferId = bundle.getString(SomewearGatewayContract.Key.TRANSFER_ID),
+                receiverAcknowledgementAvailable = bundle.getBoolean(
+                    SomewearGatewayContract.Key.RECEIVER_ACK_AVAILABLE,
+                    false,
+                ),
             )
         }
     }
@@ -389,6 +395,91 @@ internal class ContentProviderSomewearClient(
                 is SomewearResult.Failure -> throw SomewearSdkException(result.error)
             }
             delay(config.pollIntervalMillis)
+        }
+    }
+
+    override suspend fun listIncompleteMessageTransfers():
+        SomewearResult<List<IncompleteMessageTransfer>> =
+        call(SomewearGatewayContract.Method.LIST_INCOMPLETE_MESSAGE_TRANSFERS).map { bundle ->
+            bundle.bundleList(SomewearGatewayContract.Key.ITEMS).map { item ->
+                IncompleteMessageTransfer(
+                    transferId = item.getString(SomewearGatewayContract.Key.TRANSFER_ID).orEmpty(),
+                    workspaceId = item.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
+                    senderId = item.getString(SomewearGatewayContract.Key.SENDER_ID),
+                    channel = enumValueOrUnknown(
+                        item.getString(SomewearGatewayContract.Key.DELIVERED_CHANNEL),
+                        DeviceChannel.UNKNOWN,
+                    ),
+                    expectedFragmentCount = item.getInt(
+                        SomewearGatewayContract.Key.FRAGMENT_COUNT,
+                    ),
+                    receivedFragmentCount = item.getInt(
+                        SomewearGatewayContract.Key.RECEIVED_FRAGMENT_COUNT,
+                    ),
+                    missingFragmentIndexes = item
+                        .getIntArray(SomewearGatewayContract.Key.MISSING_FRAGMENT_INDEXES)
+                        ?.toList()
+                        .orEmpty(),
+                    firstReceivedAtEpochMillis = item.getLong(
+                        SomewearGatewayContract.Key.FIRST_RECEIVED_AT_MS,
+                    ),
+                    lastReceivedAtEpochMillis = item.getLong(
+                        SomewearGatewayContract.Key.LAST_RECEIVED_AT_MS,
+                    ),
+                    recoveryRequestCount = item.getInt(
+                        SomewearGatewayContract.Key.RECOVERY_REQUEST_COUNT,
+                    ),
+                    lastRecoveryRequestAtEpochMillis = item.positiveLongOrNull(
+                        SomewearGatewayContract.Key.LAST_RECOVERY_REQUEST_AT_MS,
+                    ),
+                )
+            }
+        }
+
+    override suspend fun requestMissingMessageFragments(
+        transferId: String,
+    ): SomewearResult<FragmentRecoveryReceipt> {
+        if (transferId.isBlank()) {
+            return invalid(
+                SomewearGatewayContract.Method.REQUEST_MISSING_MESSAGE_FRAGMENTS,
+                "transferId must not be blank",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.REQUEST_MISSING_MESSAGE_FRAGMENTS,
+            Bundle().apply { putString(SomewearGatewayContract.Key.TRANSFER_ID, transferId) },
+        ).map { bundle ->
+            FragmentRecoveryReceipt(
+                transferId = bundle.getString(SomewearGatewayContract.Key.TRANSFER_ID)
+                    ?: transferId,
+                requestedFragmentCount = bundle.getInt(
+                    SomewearGatewayContract.Key.REQUESTED_FRAGMENT_COUNT,
+                ),
+                recoveryRequestCount = bundle.getInt(
+                    SomewearGatewayContract.Key.RECOVERY_REQUEST_COUNT,
+                ),
+            )
+        }
+    }
+
+    override suspend fun retryFragmentedMessage(
+        messageId: String,
+    ): SomewearResult<FragmentRetryReceipt> {
+        if (messageId.isBlank()) {
+            return invalid(
+                SomewearGatewayContract.Method.RETRY_FRAGMENTED_MESSAGE,
+                "messageId must not be blank",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.RETRY_FRAGMENTED_MESSAGE,
+            Bundle().apply { putString(SomewearGatewayContract.Key.MESSAGE_ID, messageId) },
+        ).map { bundle ->
+            FragmentRetryReceipt(
+                messageId = bundle.getString(SomewearGatewayContract.Key.MESSAGE_ID) ?: messageId,
+                transferId = bundle.getString(SomewearGatewayContract.Key.TRANSFER_ID).orEmpty(),
+                fragmentCount = bundle.getInt(SomewearGatewayContract.Key.FRAGMENT_COUNT),
+            )
         }
     }
 
@@ -524,10 +615,110 @@ internal class ContentProviderSomewearClient(
                             SomewearGatewayContract.Key.BACKHAUL_ACK_REQUIRED,
                             false,
                         ),
+                        transferId = result.getString(SomewearGatewayContract.Key.TRANSFER_ID),
+                        receiverAcknowledgementAvailable = result.getBoolean(
+                            SomewearGatewayContract.Key.RECEIVER_ACK_AVAILABLE,
+                            false,
+                        ),
                     ),
                 ),
             )
         }
+
+    override suspend fun sendFileBatch(
+        request: FileBatchSendRequest,
+    ): SomewearResult<FileBatchSendReceipt> = withContext(Dispatchers.IO) {
+        val uploaded = mutableListOf<FileSendReceipt>()
+        for (item in request.files) {
+            when (
+                val result = sendFile(
+                    FileSendRequest(
+                        workspaceId = request.workspaceId,
+                        sourceUri = item.sourceUri,
+                        fileName = item.fileName,
+                        mimeType = item.mimeType,
+                        routePolicy = request.routePolicy,
+                        radioTimeoutMillis = request.radioTimeoutMillis,
+                        satelliteTimeoutMillis = request.satelliteTimeoutMillis,
+                    ),
+                )
+            ) {
+                is SomewearResult.Failure -> return@withContext result
+                is SomewearResult.Success -> uploaded += result.value
+            }
+        }
+
+        val manifest = FileBatchManifest(
+            batchId = request.batchId,
+            workspaceId = request.workspaceId,
+            revision = request.revision,
+            finalRevision = request.finalRevision,
+            expectedFileCount = uploaded.size,
+            createdAtEpochMillis = System.currentTimeMillis(),
+            files = uploaded.mapIndexed { index, file ->
+                FileBatchEntry(
+                    index = index,
+                    fileId = file.fileId,
+                    fileName = file.fileName,
+                    mimeType = file.mimeType,
+                    sizeBytes = file.sizeBytes,
+                    sha256 = file.sha256,
+                )
+            },
+        )
+        val encoded = try {
+            manifest.encodeFileBatchManifest()
+        } catch (exception: Exception) {
+            return@withContext SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.FILE_READ_FAILED,
+                    exception.message ?: "Could not encode the file batch manifest",
+                    SomewearGatewayContract.Method.PREPARE_FILE_UPLOAD,
+                    exception,
+                ),
+            )
+        }
+        if (encoded.toByteArray(Charsets.UTF_8).size > MAX_MANIFEST_BYTES) {
+            return@withContext SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.INVALID_REQUEST,
+                    "The file batch manifest exceeds $MAX_MANIFEST_BYTES bytes",
+                ),
+            )
+        }
+        val temporary = File.createTempFile(
+            "sc3-batch-${request.batchId}-r${request.revision}-",
+            ".json",
+            appContext.cacheDir,
+        )
+        try {
+            temporary.writeText(encoded, Charsets.UTF_8)
+            when (
+                val manifestResult = sendFile(
+                    FileSendRequest(
+                        workspaceId = request.workspaceId,
+                        sourceUri = Uri.fromFile(temporary),
+                        fileName = "sc3-batch-${request.batchId}-r${request.revision}.json",
+                        mimeType = FileBatchFormat.MIME_TYPE,
+                        routePolicy = request.routePolicy,
+                        radioTimeoutMillis = request.radioTimeoutMillis,
+                        satelliteTimeoutMillis = request.satelliteTimeoutMillis,
+                    ),
+                )
+            ) {
+                is SomewearResult.Failure -> manifestResult
+                is SomewearResult.Success -> SomewearResult.Success(
+                    FileBatchSendReceipt(
+                        manifest = manifest,
+                        files = uploaded,
+                        manifestFile = manifestResult.value,
+                    ),
+                )
+            }
+        } finally {
+            temporary.delete()
+        }
+    }
 
     override suspend fun pollIncomingFiles(
         afterSequence: Long,
@@ -561,6 +752,111 @@ internal class ContentProviderSomewearClient(
                 is SomewearResult.Failure -> throw SomewearSdkException(result.error)
             }
             delay(config.pollIntervalMillis)
+        }
+    }
+
+    override suspend fun readFileBatchManifest(
+        file: IncomingFile,
+    ): SomewearResult<FileBatchManifest> {
+        if (!file.isFileBatchManifest) {
+            return invalid(
+                SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                "Incoming file is not an SC3 file batch manifest",
+            )
+        }
+        return readFileBatchManifest(file.fileId, file.workspaceId)
+    }
+
+    override suspend fun readFileBatchManifest(
+        file: WorkspaceFile,
+    ): SomewearResult<FileBatchManifest> {
+        if (!file.isFileBatchManifest) {
+            return invalid(
+                SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                "Workspace file is not an SC3 file batch manifest",
+            )
+        }
+        return readFileBatchManifest(file.fileId, file.workspaceId)
+    }
+
+    override suspend fun reconcileFileBatch(
+        manifest: FileBatchManifest,
+    ): SomewearResult<FileBatchReconciliation> {
+        val catalogue = mutableListOf<WorkspaceFile>()
+        var offset = 0
+        do {
+            when (val page = listWorkspaceFiles(manifest.workspaceId, offset, 500)) {
+                is SomewearResult.Failure -> return page
+                is SomewearResult.Success -> {
+                    catalogue += page.value.files
+                    offset = page.value.nextOffset ?: -1
+                }
+            }
+        } while (offset >= 0)
+        val expectedIds = manifest.files.mapTo(linkedSetOf()) { it.fileId }
+        val available = catalogue.filter { it.fileId in expectedIds }
+        val expectedHashes = manifest.files.associate { it.fileId to it.sha256 }
+        val verifiedCachedIds = withContext(Dispatchers.IO) {
+            available
+                .filter { file ->
+                    file.cachedUri != null && runCatching {
+                        sha256OfFile(workspaceContentStore.contentFile(file)) ==
+                            expectedHashes[file.fileId]
+                    }.getOrDefault(false)
+                }
+                .mapTo(linkedSetOf()) { it.fileId }
+        }
+        return SomewearResult.Success(
+            FileBatchReconciliation(
+                manifest = manifest,
+                availableFiles = available,
+                missingFileIds = expectedIds - available.mapTo(mutableSetOf()) { it.fileId },
+                cachedFileIds = verifiedCachedIds,
+            ),
+        )
+    }
+
+    override fun syncFileBatch(
+        manifest: FileBatchManifest,
+        maxDownloadAttempts: Int,
+        replaceCachedFiles: Boolean,
+    ): Flow<WorkspaceContentSyncEvent> = syncWorkspaceContent(
+        WorkspaceContentSyncRequest(
+            workspaceId = manifest.workspaceId,
+            fileIds = manifest.files.mapTo(linkedSetOf()) { it.fileId },
+            maxDownloadAttempts = maxDownloadAttempts,
+            replaceCachedFiles = replaceCachedFiles,
+            expectedSha256ByFileId = manifest.files.associate { it.fileId to it.sha256 },
+        ),
+    )
+
+    private suspend fun readFileBatchManifest(
+        fileId: String,
+        workspaceId: Long,
+    ): SomewearResult<FileBatchManifest> = withContext(Dispatchers.IO) {
+        val ticket = requestFileDownloadUrl(fileId, workspaceId)
+        if (ticket is SomewearResult.Failure) return@withContext ticket
+        ticket as SomewearResult.Success
+        try {
+            val encoded = downloadToByteArray(ticket.value, MAX_MANIFEST_BYTES)
+                .toString(Charsets.UTF_8)
+            val manifest = decodeFileBatchManifest(encoded)
+            if (manifest.workspaceId != workspaceId) {
+                return@withContext malformed(
+                    SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                    "File batch manifest workspace does not match its catalogue entry",
+                )
+            }
+            SomewearResult.Success(manifest)
+        } catch (exception: Exception) {
+            SomewearResult.Failure(
+                SomewearError(
+                    SomewearErrorCode.FILE_INTEGRITY_FAILED,
+                    exception.message ?: "Could not validate the file batch manifest",
+                    SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                    exception,
+                ),
+            )
         }
     }
 
@@ -713,7 +1009,15 @@ internal class ContentProviderSomewearClient(
             var failedCount = 0
             for (remoteFile in selectedFiles) {
                 val cachedFile = workspaceContentStore.attachCacheState(remoteFile)
-                if (!request.replaceCachedFiles && cachedFile.cachedUri != null) {
+                val expectedSha256 = request.expectedSha256ByFileId[remoteFile.fileId]
+                val cachedFileIsTrusted = cachedFile.cachedUri != null && (
+                    expectedSha256 == null || runCatching {
+                        withContext(Dispatchers.IO) {
+                            sha256OfFile(workspaceContentStore.contentFile(remoteFile))
+                        } == expectedSha256
+                    }.getOrDefault(false)
+                )
+                if (!request.replaceCachedFiles && cachedFileIsTrusted) {
                     cachedCount++
                     emit(WorkspaceContentSyncEvent.AlreadyCached(cachedFile))
                     continue
@@ -743,6 +1047,7 @@ internal class ContentProviderSomewearClient(
                                     ticket.value,
                                     workspaceContentStore.contentFile(remoteFile),
                                     remoteFile.sizeBytes,
+                                    expectedSha256,
                                 )
                             }
                             completed = workspaceContentStore.attachCacheState(remoteFile)
@@ -822,7 +1127,9 @@ internal class ContentProviderSomewearClient(
     }
 
     private fun fileDownloadError(exception: Exception): SomewearError = SomewearError(
-        code = if (exception is FileSizeMismatchException) {
+        code = if (
+            exception is FileSizeMismatchException || exception is FileHashMismatchException
+        ) {
             SomewearErrorCode.FILE_INTEGRITY_FAILED
         } else {
             SomewearErrorCode.FILE_DOWNLOAD_FAILED
@@ -889,6 +1196,18 @@ internal class ContentProviderSomewearClient(
                 ),
                 lastPayloadParcelId = bundle.optionalInt(
                     SomewearGatewayContract.Key.LAST_PAYLOAD_PARCEL_ID,
+                ),
+                fragmentRecoveryRequestCount = bundle.getLong(
+                    SomewearGatewayContract.Key.FRAGMENT_RECOVERY_REQUEST_COUNT,
+                ),
+                retransmittedFragmentCount = bundle.getLong(
+                    SomewearGatewayContract.Key.RETRANSMITTED_FRAGMENT_COUNT,
+                ),
+                receiverCompletionAckCount = bundle.getLong(
+                    SomewearGatewayContract.Key.RECEIVER_COMPLETION_ACK_COUNT,
+                ),
+                fragmentRecoveryErrorCount = bundle.getLong(
+                    SomewearGatewayContract.Key.FRAGMENT_RECOVERY_ERROR_COUNT,
                 ),
             )
         }
@@ -1320,6 +1639,13 @@ internal class ContentProviderSomewearClient(
                 SomewearGatewayContract.Key.UPDATED_AT_MS,
                 System.currentTimeMillis(),
             ),
+            receiverConfirmed = bundle.getBoolean(
+                SomewearGatewayContract.Key.RECEIVER_CONFIRMED,
+                false,
+            ),
+            receiverConfirmedAtEpochMillis = bundle.positiveLongOrNull(
+                SomewearGatewayContract.Key.RECEIVER_CONFIRMED_AT_MS,
+            ),
         )
 
     private fun parseIncomingMessage(bundle: Bundle): IncomingMessage = IncomingMessage(
@@ -1425,6 +1751,7 @@ internal class ContentProviderSomewearClient(
             "FILE_UPLOAD_FAILED" -> SomewearErrorCode.FILE_UPLOAD_FAILED
             "FILE_DOWNLOAD_FAILED" -> SomewearErrorCode.FILE_DOWNLOAD_FAILED
             "FILE_INTEGRITY_FAILED" -> SomewearErrorCode.FILE_INTEGRITY_FAILED
+            "FRAGMENT_RECOVERY_FAILED" -> SomewearErrorCode.FRAGMENT_RECOVERY_FAILED
             "PERMISSION_DENIED" -> SomewearErrorCode.PERMISSION_DENIED
             "PAYLOAD_TOO_LARGE_FOR_RADIO" -> SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO
             "PAYLOAD_TOO_LARGE_FOR_SATELLITE" ->

@@ -50,6 +50,11 @@ public object SomewearGatewayContract {
         public const val CANCEL_MESSAGE: String = "cancelMessage"
         public const val GET_DELIVERY_STATUS: String = "getDeliveryStatus"
         public const val POLL_INCOMING_MESSAGES: String = "pollIncomingMessages"
+        public const val LIST_INCOMPLETE_MESSAGE_TRANSFERS: String =
+            "listIncompleteMessageTransfers"
+        public const val REQUEST_MISSING_MESSAGE_FRAGMENTS: String =
+            "requestMissingMessageFragments"
+        public const val RETRY_FRAGMENTED_MESSAGE: String = "retryFragmentedMessage"
         internal const val PREPARE_FILE_UPLOAD: String = "prepareFileUpload"
         internal const val SEND_FILE_METADATA: String = "sendFileMetadata"
         public const val POLL_INCOMING_FILES: String = "pollIncomingFiles"
@@ -140,6 +145,17 @@ public object SomewearGatewayContract {
         public const val BACKHAUL_ACK_REQUIRED: String = "backhaul_ack_required"
         public const val SATELLITE_FALLBACK_ARMED: String = "satellite_fallback_armed"
         public const val ACCEPTED_AT_MS: String = "accepted_at_ms"
+        public const val TRANSFER_ID: String = "transfer_id"
+        public const val RECEIVER_ACK_AVAILABLE: String = "receiver_ack_available"
+        public const val RECEIVER_CONFIRMED: String = "receiver_confirmed"
+        public const val RECEIVER_CONFIRMED_AT_MS: String = "receiver_confirmed_at_ms"
+        public const val RECEIVED_FRAGMENT_COUNT: String = "received_fragment_count"
+        public const val MISSING_FRAGMENT_INDEXES: String = "missing_fragment_indexes"
+        public const val FIRST_RECEIVED_AT_MS: String = "first_received_at_ms"
+        public const val LAST_RECEIVED_AT_MS: String = "last_received_at_ms"
+        public const val RECOVERY_REQUEST_COUNT: String = "recovery_request_count"
+        public const val LAST_RECOVERY_REQUEST_AT_MS: String = "last_recovery_request_at_ms"
+        public const val REQUESTED_FRAGMENT_COUNT: String = "requested_fragment_count"
 
         internal const val FILE_UPLOAD_URL: String = "file_upload_url"
         public const val FILE_ID: String = "file_id"
@@ -192,6 +208,14 @@ public object SomewearGatewayContract {
         public const val LAST_PAYLOAD_STATUS: String = "last_payload_status"
         public const val LAST_PAYLOAD_OUTBOUND: String = "last_payload_outbound"
         public const val LAST_PAYLOAD_PARCEL_ID: String = "last_payload_parcel_id"
+        public const val FRAGMENT_RECOVERY_REQUEST_COUNT: String =
+            "fragment_recovery_request_count"
+        public const val RETRANSMITTED_FRAGMENT_COUNT: String =
+            "retransmitted_fragment_count"
+        public const val RECEIVER_COMPLETION_ACK_COUNT: String =
+            "receiver_completion_ack_count"
+        public const val FRAGMENT_RECOVERY_ERROR_COUNT: String =
+            "fragment_recovery_error_count"
 
         public const val INVITE_CODE: String = "invite_code"
         public const val WORKSPACE_TIMEOUT_MS: String = "workspace_timeout_ms"

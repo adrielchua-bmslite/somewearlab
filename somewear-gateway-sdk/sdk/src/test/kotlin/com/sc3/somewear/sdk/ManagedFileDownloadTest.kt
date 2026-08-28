@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.net.InetAddress
 import java.net.ServerSocket
+import java.security.MessageDigest
 import java.nio.file.Files
 import kotlin.concurrent.thread
 
@@ -39,6 +40,45 @@ class ManagedFileDownloadTest {
                 assertFalse(destination.exists())
                 assertFalse(directory.listFiles().orEmpty().any { it.name.endsWith(".part") })
             }
+        }
+    }
+
+    @Test
+    fun hashMismatchDoesNotPublishPartialFile() {
+        val bytes = ByteArray(8_192) { index -> (index % 113).toByte() }
+        withServer(bytes) { url ->
+            val directory = Files.createTempDirectory("somewear-content-test").toFile()
+            val destination = directory.resolve("corrupt.bin")
+
+            try {
+                downloadToManagedFile(
+                    url,
+                    destination,
+                    bytes.size.toLong(),
+                    "0".repeat(64),
+                )
+                throw AssertionError("Expected FileHashMismatchException")
+            } catch (_: FileHashMismatchException) {
+                assertFalse(destination.exists())
+                assertFalse(directory.listFiles().orEmpty().any { it.name.endsWith(".part") })
+            }
+        }
+    }
+
+    @Test
+    fun matchingHashPublishesVerifiedFile() {
+        val bytes = "verified batch content".toByteArray()
+        val expectedHash = MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        withServer(bytes) { url ->
+            val destination = Files.createTempDirectory("somewear-content-test")
+                .resolve("verified.bin")
+                .toFile()
+
+            downloadToManagedFile(url, destination, bytes.size.toLong(), expectedHash)
+
+            assertArrayEquals(bytes, destination.readBytes())
         }
     }
 

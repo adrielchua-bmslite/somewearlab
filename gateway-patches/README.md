@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v16. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v17. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -33,6 +33,9 @@
 - assigns every transport fragment a persisted, distinct whole-second timestamp so
   the retained receiver's message duplicate query does not discard different
   fragments that were queued during the same second.
+- durably journals fragmented Radio sends and incomplete receives, automatically
+  requests missing fragment indexes, selectively retransmits retained fragments,
+  and records the peer gateway's completion acknowledgement.
 - leaves oversized `SATELLITE_ONLY` JSON and Satellite fallback attempts as one
   parent `MessagePayload`. The retained core's native `CompositePackager` owns
   Satellite `Part` splitting and `PostOffice` reassembles the parent before the

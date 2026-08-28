@@ -8,6 +8,7 @@ import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -137,8 +138,12 @@ internal fun downloadToManagedFile(
     signedDownloadUrl: String,
     destination: File,
     expectedSizeBytes: Long,
+    expectedSha256: String? = null,
 ): Long {
     require(expectedSizeBytes >= 0L) { "expectedSizeBytes must be non-negative" }
+    require(expectedSha256 == null || expectedSha256.matches(Regex("[0-9a-f]{64}"))) {
+        "expectedSha256 must be lowercase hexadecimal"
+    }
     destination.parentFile?.mkdirs()
     val temporary = File(
         destination.parentFile,
@@ -155,6 +160,7 @@ internal fun downloadToManagedFile(
             throw IllegalStateException("Somewear file download returned HTTP $code")
         }
         var count = 0L
+        val digest = expectedSha256?.let { MessageDigest.getInstance("SHA-256") }
         BufferedInputStream(connection.inputStream).use { input ->
             BufferedOutputStream(temporary.outputStream()).use { output ->
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -163,12 +169,19 @@ internal fun downloadToManagedFile(
                     if (read < 0) break
                     if (read == 0) continue
                     output.write(buffer, 0, read)
+                    digest?.update(buffer, 0, read)
                     count += read
                 }
             }
         }
         if (count != expectedSizeBytes) {
             throw FileSizeMismatchException(expectedSizeBytes, count)
+        }
+        if (digest != null) {
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            if (actualSha256 != expectedSha256) {
+                throw FileHashMismatchException(expectedSha256.orEmpty(), actualSha256)
+            }
         }
         try {
             Files.move(
@@ -191,9 +204,72 @@ internal fun downloadToManagedFile(
     }
 }
 
+internal fun downloadToByteArray(
+    signedDownloadUrl: String,
+    maximumBytes: Int,
+): ByteArray {
+    require(maximumBytes > 0) { "maximumBytes must be positive" }
+    val connection = (URL(signedDownloadUrl).openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 30_000
+        readTimeout = 120_000
+    }
+    try {
+        val code = connection.responseCode
+        if (code !in 200..299) {
+            throw IllegalStateException("Somewear file download returned HTTP $code")
+        }
+        val declared = connection.contentLengthLong
+        if (declared > maximumBytes) {
+            throw IllegalStateException("Somewear file exceeds the $maximumBytes byte limit")
+        }
+        val output = ByteArrayOutputStream(
+            if (declared in 1..maximumBytes.toLong()) declared.toInt() else DEFAULT_BUFFER_SIZE,
+        )
+        BufferedInputStream(connection.inputStream).use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var count = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                count += read
+                if (count > maximumBytes) {
+                    throw IllegalStateException("Somewear file exceeds the $maximumBytes byte limit")
+                }
+                output.write(buffer, 0, read)
+            }
+        }
+        return output.toByteArray()
+    } finally {
+        connection.disconnect()
+    }
+}
+
+internal fun sha256OfFile(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().buffered().use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            if (read == 0) continue
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
 internal class FileSizeMismatchException(
     val expectedBytes: Long,
     val actualBytes: Long,
 ) : IllegalStateException(
     "Downloaded file size mismatch: expected $expectedBytes bytes but received $actualBytes",
+)
+
+internal class FileHashMismatchException(
+    val expectedSha256: String,
+    val actualSha256: String,
+) : IllegalStateException(
+    "Downloaded file SHA-256 mismatch: expected $expectedSha256 but received $actualSha256",
 )

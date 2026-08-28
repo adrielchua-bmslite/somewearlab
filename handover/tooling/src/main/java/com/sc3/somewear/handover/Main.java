@@ -160,6 +160,14 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/TransportFragmentationPolicy.java"
         );
+        Path recoveryProtocol = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/FragmentRecoveryProtocol.java"
+        );
+        Path recoveryStore = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/FragmentRecoveryStore.java"
+        );
         Path scanner = repoRoot.resolve(
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/WorkspaceQrScannerActivity.java"
@@ -185,6 +193,8 @@ public final class Main {
         requireFile(provider, "gateway provider patch");
         requireFile(helper, "gateway v2 helper");
         requireFile(transportPolicy, "gateway transport policy");
+        requireFile(recoveryProtocol, "Radio fragment recovery protocol");
+        requireFile(recoveryStore, "Radio fragment recovery journal");
         requireFile(fallbackCoordinator, "radio-to-satellite fallback coordinator");
         requireFile(fallbackEnvelope, "fallback message envelope");
         requireFile(inboundDeduplicator, "cross-channel inbound deduplicator");
@@ -275,10 +285,27 @@ public final class Main {
                 || !helperSource.contains("workspace_file_catalog")
                 || !helperSource.contains("getGetFilesMethod")
                 || !sdkClientSource.contains(" listWorkspaceFiles(")
+                || !sdkClientSource.contains(" sendFileBatch(")
+                || !sdkClientSource.contains(" readFileBatchManifest(")
+                || !sdkClientSource.contains(" reconcileFileBatch(")
+                || !sdkClientSource.contains(" syncFileBatch(")
                 || !sdkClientSource.contains(" syncWorkspaceContent(")
                 || !sdkClientSource.contains(" cachedWorkspaceFiles(")) {
             throw new IllegalStateException(
                     "Gateway/SDK must expose workspace catalogue and SDK-owned missing-file recovery"
+            );
+        }
+        if (!helperSource.contains("radio_fragment_recovery")
+                || !helperSource.contains("radio_fragment_persistence")
+                || !helperSource.contains("radio_receiver_ack")
+                || !helperSource.contains("listIncompleteMessageTransfers")
+                || !helperSource.contains("requestMissingMessageFragments")
+                || !helperSource.contains("retryFragmentedMessage")
+                || !sdkClientSource.contains(" listIncompleteMessageTransfers(")
+                || !sdkClientSource.contains(" requestMissingMessageFragments(")
+                || !sdkClientSource.contains(" retryFragmentedMessage(")) {
+            throw new IllegalStateException(
+                    "Gateway/SDK must expose durable receiver-confirmed Radio recovery"
             );
         }
         if (!scannerSource.contains("com.budiyev.android.codescanner.CodeScannerView")
@@ -417,6 +444,14 @@ public final class Main {
                 "com/sc3/somewear/sdk/WorkspaceFile.class",
                 "com/sc3/somewear/sdk/WorkspaceFilePage.class",
                 "com/sc3/somewear/sdk/WorkspaceContentSyncRequest.class",
+                "com/sc3/somewear/sdk/FileBatchItemRequest.class",
+                "com/sc3/somewear/sdk/FileBatchSendRequest.class",
+                "com/sc3/somewear/sdk/FileBatchManifest.class",
+                "com/sc3/somewear/sdk/FileBatchSendReceipt.class",
+                "com/sc3/somewear/sdk/FileBatchReconciliation.class",
+                "com/sc3/somewear/sdk/IncompleteMessageTransfer.class",
+                "com/sc3/somewear/sdk/FragmentRecoveryReceipt.class",
+                "com/sc3/somewear/sdk/FragmentRetryReceipt.class",
                 "com/sc3/somewear/sdk/SendRequest.class",
                 "com/sc3/somewear/sdk/FileSendRequest.class",
                 "com/sc3/somewear/sdk/SendReceipt.class"
@@ -466,6 +501,13 @@ public final class Main {
                 "downloadWorkspaceFile",
                 "cachedWorkspaceFiles",
                 "syncWorkspaceContent",
+                "sendFileBatch",
+                "readFileBatchManifest",
+                "reconcileFileBatch",
+                "syncFileBatch",
+                "listIncompleteMessageTransfers",
+                "requestMissingMessageFragments",
+                "retryFragmentedMessage",
                 "factoryReset"
         );
         for (String method : requiredMethods) {
@@ -494,6 +536,7 @@ public final class Main {
         boolean legacySatelliteReassembly = false;
         boolean transmissionEstimate = false;
         boolean workspaceFileCatalog = false;
+        boolean fragmentRecovery = false;
         boolean providerClass = false;
         boolean gatewayV2Class = false;
         try (ZipFile archive = new ZipFile(apk.toFile())) {
@@ -524,6 +567,13 @@ public final class Main {
                 workspaceFileCatalog |= dex.contains("workspace_file_catalog")
                         && dex.contains("listWorkspaceFiles")
                         && dex.contains("getGetFilesMethod");
+                fragmentRecovery |= dex.contains("radio_fragment_recovery")
+                        && dex.contains("listIncompleteMessageTransfers")
+                        && dex.contains("requestMissingMessageFragments")
+                        && dex.contains("retryFragmentedMessage")
+                        && definedClasses.contains(
+                                "Lcom/somewearlabs/gateway/FragmentRecoveryStore;"
+                        );
             }
         }
         if (!providerClass
@@ -537,7 +587,8 @@ public final class Main {
                 || !satelliteBackhaulAck
                 || !legacySatelliteReassembly
                 || !transmissionEstimate
-                || !workspaceFileCatalog) {
+                || !workspaceFileCatalog
+                || !fragmentRecovery) {
             throw new IllegalStateException(
                     "base APK is missing its provider/helper class definition, controlled fallback,"
                             + " native Satellite composite, or workspace file catalogue contract"

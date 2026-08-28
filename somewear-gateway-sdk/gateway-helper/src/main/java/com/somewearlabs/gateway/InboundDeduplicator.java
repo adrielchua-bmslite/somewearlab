@@ -30,6 +30,11 @@ final class InboundDeduplicator {
         return true;
     }
 
+    synchronized boolean hasSeen(String key, long now) {
+        expire(now);
+        return seen.containsKey(key);
+    }
+
     synchronized void clear() {
         seen.clear();
     }

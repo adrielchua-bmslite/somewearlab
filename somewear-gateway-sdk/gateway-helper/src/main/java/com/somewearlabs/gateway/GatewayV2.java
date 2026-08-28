@@ -9,6 +9,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 
+import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -52,6 +54,10 @@ public final class GatewayV2 {
     private static final long DEFAULT_RADIO_TIMEOUT_MS = 30_000L;
     private static final long DEFAULT_SATELLITE_TIMEOUT_MS = 300_000L;
     private static final long INBOUND_DEDUP_TTL_MS = 24L * 60L * 60L * 1_000L;
+    private static final long RECOVERY_QUIET_PERIOD_MS = 15_000L;
+    private static final long MAX_RECOVERY_BACKOFF_MS = 2L * 60L * 1_000L;
+    private static final int MAX_AUTOMATIC_RECOVERY_ROUNDS = 6;
+    private static final int MAX_RECOVERY_CONTROL_MESSAGES_PER_ROUND = 8;
     private static final int SETTING_TRACKING_ENABLED = 0;
     private static final int SETTING_TRACKING_FREQUENCY = 1;
     private static final int SETTING_NO_SLEEP = 4;
@@ -69,6 +75,8 @@ public final class GatewayV2 {
     private static final List<Bundle> INCOMING = new ArrayList<>();
     private static final List<Bundle> INCOMING_FILES = new ArrayList<>();
     private static final Map<String, Bundle> DELIVERY = new LinkedHashMap<>();
+    private static final Map<String, Long> RECOVERY_SCHEDULE_GENERATIONS =
+            new LinkedHashMap<>();
     private static final RadioMessageReassembler RADIO_REASSEMBLER =
             new RadioMessageReassembler();
     private static final FragmentDeliveryTracker DELIVERY_TRACKER =
@@ -76,6 +84,8 @@ public final class GatewayV2 {
     private static final RouteFallbackCoordinator<SatelliteAttempt> ROUTE_FALLBACKS =
             new RouteFallbackCoordinator<>();
     private static final InboundDeduplicator INBOUND_DEDUP =
+            new InboundDeduplicator(4_000, INBOUND_DEDUP_TTL_MS);
+    private static final InboundDeduplicator COMPLETED_FRAGMENT_TRANSFERS =
             new InboundDeduplicator(4_000, INBOUND_DEDUP_TTL_MS);
     private static final ScheduledExecutorService FALLBACK_EXECUTOR =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -98,6 +108,10 @@ public final class GatewayV2 {
     private static long inboundRadioFragmentCount;
     private static long completedRadioMessageCount;
     private static long invalidRadioFragmentCount;
+    private static long recoveryRequestCount;
+    private static long retransmittedFragmentCount;
+    private static long receiverCompletionAckCount;
+    private static long recoveryErrorCount;
     private static String lastPayloadType;
     private static String lastReceiveError;
     private static String lastDeliveredChannel;
@@ -106,6 +120,7 @@ public final class GatewayV2 {
     private static int lastPayloadParcelId;
     private static Object compositePackager;
     private static Object fileRemoteSource;
+    private static FragmentRecoveryStore fragmentRecoveryStore;
 
     private GatewayV2() {}
 
@@ -113,6 +128,15 @@ public final class GatewayV2 {
         appContext = context.getApplicationContext() != null
                 ? context.getApplicationContext()
                 : context;
+        try {
+            fragmentRecoveryStore = new FragmentRecoveryStore(
+                    new File(appContext.getFilesDir(), "sc3-message-recovery")
+            );
+            fragmentRecoveryStore.prune(System.currentTimeMillis());
+        } catch (IOException failure) {
+            fragmentRecoveryStore = null;
+            Log.e(LOG_TAG, "Could not initialize the private fragment recovery journal");
+        }
     }
 
     /** Returns null when the legacy provider should handle the method. */
@@ -123,6 +147,15 @@ public final class GatewayV2 {
             if ("cancelMessage".equals(method)) return cancelMessage(extras);
             if ("getDeliveryStatus".equals(method)) return deliveryStatus(extras);
             if ("pollIncomingMessages".equals(method)) return pollIncoming(extras);
+            if ("listIncompleteMessageTransfers".equals(method)) {
+                return listIncompleteMessageTransfers();
+            }
+            if ("requestMissingMessageFragments".equals(method)) {
+                return requestMissingMessageFragments(extras);
+            }
+            if ("retryFragmentedMessage".equals(method)) {
+                return retryFragmentedMessage(extras);
+            }
             if ("prepareFileUpload".equals(method)) return prepareFileUpload(extras);
             if ("sendFileMetadata".equals(method)) return sendFileMetadata(extras);
             if ("pollIncomingFiles".equals(method)) return pollIncomingFiles(extras);
@@ -134,6 +167,9 @@ public final class GatewayV2 {
             if ("testDispatchRouterMessage".equals(method)) return dispatchTestRouterMessage(extras);
             if ("testDispatchFramedRouterMessage".equals(method)) {
                 return dispatchTestFramedRouterMessage(extras);
+            }
+            if ("testClearVolatileFragmentState".equals(method)) {
+                return clearVolatileFragmentStateForTest();
             }
             if ("testDispatchFallbackRouterMessage".equals(method)) {
                 return dispatchTestFallbackRouterMessage(extras);
@@ -242,6 +278,9 @@ public final class GatewayV2 {
                 "radio_only",
                 "radio_fragmentation",
                 "radio_fragment_dedup",
+                "radio_fragment_recovery",
+                "radio_fragment_persistence",
+                "radio_receiver_ack",
                 "radio_then_satellite",
                 "satellite_only",
                 "satellite_native_composite",
@@ -735,6 +774,7 @@ public final class GatewayV2 {
         ensurePayloadSubscription();
 
         List<Object> payloads = new ArrayList<>();
+        BuiltTransportFragments recoverableRadioTransfer = null;
         final String fallbackContent;
         if (fallback) {
             try {
@@ -756,12 +796,13 @@ public final class GatewayV2 {
         );
         if (TransportFragmentationPolicy.shouldFragment(channel, originalTransmissionCount)) {
             try {
-                payloads.addAll(buildTransportFragmentPayloads(
+                recoverableRadioTransfer = buildTransportFragmentPayloads(
                         messageId,
                         content,
                         workspaceId,
                         channel
-                ));
+                );
+                payloads.addAll(recoverableRadioTransfer.payloads);
             } catch (IllegalArgumentException exception) {
                 return error(
                         "Radio".equals(channel)
@@ -772,6 +813,30 @@ public final class GatewayV2 {
             }
         } else {
             payloads.add(originalPayload);
+        }
+
+        if (recoverableRadioTransfer != null) {
+            FragmentRecoveryStore store = fragmentRecoveryStore;
+            if (store == null) {
+                return error(
+                        "FRAGMENT_RECOVERY_FAILED",
+                        "The private Radio fragment recovery journal is unavailable"
+                );
+            }
+            try {
+                store.saveOutgoing(
+                        recoverableRadioTransfer.transferId,
+                        messageId,
+                        workspaceId,
+                        recoverableRadioTransfer.frames,
+                        System.currentTimeMillis()
+                );
+            } catch (IOException | RuntimeException failure) {
+                return error(
+                        "FRAGMENT_RECOVERY_FAILED",
+                        "Could not retain Radio fragments for receiver-requested recovery"
+                );
+            }
         }
 
         SatelliteAttempt satelliteAttempt = null;
@@ -870,6 +935,10 @@ public final class GatewayV2 {
                 TransportFragmentationPolicy.requiresBackhaulAck(channel)
         );
         result.putBoolean("satellite_fallback_armed", fallbackArmed);
+        result.putBoolean("receiver_ack_available", recoverableRadioTransfer != null);
+        if (recoverableRadioTransfer != null) {
+            result.putString("transfer_id", recoverableRadioTransfer.transferId);
+        }
         if (fallback) result.putLong("satellite_timeout_ms", satelliteTimeout);
         result.putLong("accepted_at_ms", acceptedAt);
         return result;
@@ -1113,7 +1182,7 @@ public final class GatewayV2 {
         }
     }
 
-    private static List<Object> buildTransportFragmentPayloads(
+    private static BuiltTransportFragments buildTransportFragmentPayloads(
             String messageId,
             String content,
             long workspaceId,
@@ -1157,13 +1226,41 @@ public final class GatewayV2 {
                                 + "; firstEpochSecond=" + timestamps.firstEpochSecond
                                 + "; lastEpochSecond=" + timestamps.lastEpochSecond
                 );
-                return payloads;
+                RadioMessageFraming.Frame first = RadioMessageFraming.parse(frames.get(0));
+                if (first == null) {
+                    throw new IllegalStateException("SC3 framing did not produce a recoverable frame");
+                }
+                return new BuiltTransportFragments(
+                        transferId,
+                        first.checksum,
+                        frames,
+                        payloads
+                );
             }
         }
         throw new IllegalArgumentException(
                 "The Somewear build cannot fit the SC3 fragment header in one "
                         + channel.toLowerCase(Locale.US) + " transmission"
         );
+    }
+
+    private static final class BuiltTransportFragments {
+        final String transferId;
+        final long checksum;
+        final List<String> frames;
+        final List<Object> payloads;
+
+        BuiltTransportFragments(
+                String transferId,
+                long checksum,
+                List<String> frames,
+                List<Object> payloads
+        ) {
+            this.transferId = transferId;
+            this.checksum = checksum;
+            this.frames = new ArrayList<>(frames);
+            this.payloads = new ArrayList<>(payloads);
+        }
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -1185,6 +1282,168 @@ public final class GatewayV2 {
         );
         invoke(options, "setTimeout", (int) Math.max(1L, Math.min(Integer.MAX_VALUE, timeout)));
         return options;
+    }
+
+    private static int sendRecoveryRequests(
+            FragmentRecoveryStore.IncomingRecord record
+    ) throws Exception {
+        List<List<Integer>> batches = FragmentRecoveryProtocol.batches(record.missingIndexes());
+        if (batches.isEmpty()) return 0;
+        int batchLimit = Math.min(MAX_RECOVERY_CONTROL_MESSAGES_PER_ROUND, batches.size());
+        int start = (record.recoveryRequestCount * batchLimit) % batches.size();
+        List<String> controls = new ArrayList<>(batchLimit);
+        int requested = 0;
+        for (int offset = 0; offset < batchLimit; offset++) {
+            List<Integer> indexes = batches.get((start + offset) % batches.size());
+            String content = FragmentRecoveryProtocol.encodeRequest(
+                    record.transferId,
+                    record.checksum,
+                    indexes
+            );
+            Object payload = buildMessagePayload(content, record.workspaceId);
+            if (approximateTransmissionCount(payload) != 1) {
+                throw new IllegalStateException(
+                        "The Somewear Radio MTU cannot carry a fragment recovery request"
+                );
+            }
+            controls.add(content);
+            requested += indexes.size();
+        }
+        sendControlMessages(controls, record.workspaceId);
+        return requested;
+    }
+
+    private static void sendRecoveryAck(
+            String transferId,
+            long checksum,
+            long workspaceId
+    ) throws Exception {
+        String content = FragmentRecoveryProtocol.encodeAck(transferId, checksum);
+        Object payload = buildMessagePayload(content, workspaceId);
+        if (approximateTransmissionCount(payload) != 1) {
+            throw new IllegalStateException(
+                    "The Somewear Radio MTU cannot carry a fragment completion acknowledgement"
+            );
+        }
+        sendControlMessages(Collections.singletonList(content), workspaceId);
+    }
+
+    private static void sendControlMessages(List<String> contents, long workspaceId)
+            throws Exception {
+        if (contents.isEmpty()) return;
+        RadioFragmentTimestamps.Reservation timestamps =
+                reserveRadioFragmentTimestamps(contents.size());
+        Object activeRouter = router();
+        Method send = findMethod(activeRouter.getClass(), "send", 2);
+        for (int index = 0; index < contents.size(); index++) {
+            Object payload = buildMessagePayload(
+                    contents.get(index),
+                    workspaceId,
+                    timestamps.timestampMillis(index)
+            );
+            send.invoke(activeRouter, payload, sendOptions("Radio", DEFAULT_RADIO_TIMEOUT_MS));
+        }
+    }
+
+    private static int retransmitStoredFrames(
+            FragmentRecoveryStore.OutgoingRecord record,
+            List<Integer> requestedIndexes
+    ) throws Exception {
+        List<Integer> valid = new ArrayList<>();
+        for (Integer index : requestedIndexes) {
+            if (index != null && index >= 0 && index < record.frames.size() && !valid.contains(index)) {
+                valid.add(index);
+            }
+        }
+        if (valid.isEmpty()) return 0;
+        RadioFragmentTimestamps.Reservation timestamps = reserveRadioFragmentTimestamps(valid.size());
+        Object activeRouter = router();
+        Method send = findMethod(activeRouter.getClass(), "send", 2);
+        for (int position = 0; position < valid.size(); position++) {
+            String frame = record.frames.get(valid.get(position));
+            Object payload = buildMessagePayload(
+                    frame,
+                    record.workspaceId,
+                    timestamps.timestampMillis(position)
+            );
+            send.invoke(activeRouter, payload, sendOptions("Radio", DEFAULT_RADIO_TIMEOUT_MS));
+        }
+        synchronized (LOCK) {
+            retransmittedFragmentCount += valid.size();
+        }
+        return valid.size();
+    }
+
+    private static void scheduleRecoveryRequest(FragmentRecoveryStore.IncomingRecord record) {
+        if (record == null || record.isComplete()) return;
+        final long generation;
+        synchronized (LOCK) {
+            generation = RECOVERY_SCHEDULE_GENERATIONS.getOrDefault(record.key, 0L) + 1L;
+            RECOVERY_SCHEDULE_GENERATIONS.put(record.key, generation);
+        }
+        long shift = Math.min(3, Math.max(0, record.recoveryRequestCount));
+        long delay = Math.min(MAX_RECOVERY_BACKOFF_MS, RECOVERY_QUIET_PERIOD_MS << shift);
+        FALLBACK_EXECUTOR.schedule(
+                () -> runScheduledRecovery(record.key, generation),
+                delay,
+                TimeUnit.MILLISECONDS
+        );
+    }
+
+    private static void runScheduledRecovery(String key, long generation) {
+        synchronized (LOCK) {
+            Long current = RECOVERY_SCHEDULE_GENERATIONS.get(key);
+            if (current == null || current != generation) return;
+        }
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        if (store == null) return;
+        FragmentRecoveryStore.IncomingRecord record = store.findIncomingByKey(
+                key,
+                System.currentTimeMillis()
+        );
+        if (record == null || record.isComplete()) {
+            synchronized (LOCK) {
+                RECOVERY_SCHEDULE_GENERATIONS.remove(key);
+            }
+            return;
+        }
+        if (record.recoveryRequestCount >= MAX_AUTOMATIC_RECOVERY_ROUNDS) return;
+        try {
+            ensureCoreStarted();
+            ensurePayloadSubscription();
+            int requested = sendRecoveryRequests(record);
+            FragmentRecoveryStore.IncomingRecord updated = store.markRecoveryRequested(
+                    key,
+                    System.currentTimeMillis()
+            );
+            synchronized (LOCK) {
+                recoveryRequestCount += requested;
+            }
+            if (updated != null && !updated.isComplete()) scheduleRecoveryRequest(updated);
+        } catch (Throwable failure) {
+            synchronized (LOCK) {
+                recoveryErrorCount++;
+            }
+            recordReceiveError("RECOVERY_REQUEST", failure);
+            try {
+                FragmentRecoveryStore.IncomingRecord updated = store.markRecoveryRequested(
+                        key,
+                        System.currentTimeMillis()
+                );
+                if (updated != null
+                        && updated.recoveryRequestCount < MAX_AUTOMATIC_RECOVERY_ROUNDS) {
+                    scheduleRecoveryRequest(updated);
+                }
+            } catch (IOException persistenceFailure) {
+                recordReceiveError("RECOVERY_REQUEST_STATE", persistenceFailure);
+            }
+        }
+    }
+
+    private static void cancelScheduledRecovery(String key) {
+        synchronized (LOCK) {
+            RECOVERY_SCHEDULE_GENERATIONS.remove(key);
+        }
     }
 
     private static int approximateTransmissionCount(Object payload) throws Exception {
@@ -1309,6 +1568,108 @@ public final class GatewayV2 {
         }
         Bundle result = ok("Incoming messages");
         result.putParcelableArrayList("items", items);
+        return result;
+    }
+
+    private static Bundle listIncompleteMessageTransfers() {
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        if (store == null) {
+            return error(
+                    "FRAGMENT_RECOVERY_FAILED",
+                    "The private Radio fragment recovery journal is unavailable"
+            );
+        }
+        ArrayList<Bundle> items = new ArrayList<>();
+        for (FragmentRecoveryStore.IncomingRecord record :
+                store.listIncoming(System.currentTimeMillis())) {
+            Bundle item = new Bundle();
+            item.putString("transfer_id", record.transferId);
+            item.putLong("workspace_id", record.workspaceId);
+            item.putString("sender_id", record.senderId);
+            item.putString("delivered_channel", record.channel);
+            item.putInt("fragment_count", record.fragmentCount);
+            item.putInt("received_fragment_count", record.receivedCount());
+            List<Integer> missing = record.missingIndexes();
+            int[] indexes = new int[missing.size()];
+            for (int index = 0; index < missing.size(); index++) indexes[index] = missing.get(index);
+            item.putIntArray("missing_fragment_indexes", indexes);
+            item.putLong("first_received_at_ms", record.firstReceivedAt);
+            item.putLong("last_received_at_ms", record.lastReceivedAt);
+            item.putInt("recovery_request_count", record.recoveryRequestCount);
+            item.putLong("last_recovery_request_at_ms", record.lastRecoveryRequestAt);
+            items.add(item);
+        }
+        Bundle result = ok("Incomplete SC3 Radio message transfers");
+        result.putParcelableArrayList("items", items);
+        return result;
+    }
+
+    private static Bundle requestMissingMessageFragments(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String transferId = requiredString(extras, "transfer_id");
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        if (store == null) {
+            return error(
+                    "FRAGMENT_RECOVERY_FAILED",
+                    "The private Radio fragment recovery journal is unavailable"
+            );
+        }
+        FragmentRecoveryStore.IncomingRecord record = store.findIncoming(
+                transferId,
+                System.currentTimeMillis()
+        );
+        if (record == null || record.isComplete()) {
+            return error("NOT_FOUND", "No incomplete Radio transfer matches transfer_id");
+        }
+        ensureCoreStarted();
+        ensurePayloadSubscription();
+        int requested = sendRecoveryRequests(record);
+        FragmentRecoveryStore.IncomingRecord updated = store.markRecoveryRequested(
+                record.key,
+                System.currentTimeMillis()
+        );
+        synchronized (LOCK) {
+            recoveryRequestCount += requested;
+        }
+        Bundle result = ok("Missing Radio fragments requested from the original sender");
+        result.putString("transfer_id", transferId);
+        result.putInt("requested_fragment_count", requested);
+        result.putInt(
+                "recovery_request_count",
+                updated == null ? record.recoveryRequestCount + 1 : updated.recoveryRequestCount
+        );
+        return result;
+    }
+
+    private static Bundle retryFragmentedMessage(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        String messageId = requiredString(extras, "message_id");
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        if (store == null) {
+            return error(
+                    "FRAGMENT_RECOVERY_FAILED",
+                    "The private Radio fragment recovery journal is unavailable"
+            );
+        }
+        FragmentRecoveryStore.OutgoingRecord record = store.findOutgoingByMessage(
+                messageId,
+                System.currentTimeMillis()
+        );
+        if (record == null) {
+            return error(
+                    "NOT_FOUND",
+                    "No retained fragmented Radio message matches message_id"
+            );
+        }
+        ensureCoreStarted();
+        ensurePayloadSubscription();
+        List<Integer> indexes = new ArrayList<>(record.frames.size());
+        for (int index = 0; index < record.frames.size(); index++) indexes.add(index);
+        int resent = retransmitStoredFrames(record, indexes);
+        Bundle result = ok("Retained Radio message fragments re-queued");
+        result.putString("message_id", messageId);
+        result.putString("transfer_id", record.transferId);
+        result.putInt("fragment_count", resent);
         return result;
     }
 
@@ -1732,6 +2093,10 @@ public final class GatewayV2 {
 
     private static Bundle receiveHealth() {
         Bundle result = ok("Gateway receive health");
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        int persistedIncomplete = store == null
+                ? 0
+                : store.listIncoming(System.currentTimeMillis()).size();
         synchronized (LOCK) {
             result.putBoolean("receive_subscription_active", payloadSubscription != null);
             result.putLong("router_callback_count", routerCallbackCount);
@@ -1748,7 +2113,11 @@ public final class GatewayV2 {
             result.putLong("completed_transport_message_count", completedRadioMessageCount);
             result.putLong("invalid_transport_fragment_count", invalidRadioFragmentCount);
             result.putInt("active_radio_reassemblies", RADIO_REASSEMBLER.activeCount());
-            result.putInt("active_transport_reassemblies", RADIO_REASSEMBLER.activeCount());
+            result.putInt("active_transport_reassemblies", persistedIncomplete);
+            result.putLong("fragment_recovery_request_count", recoveryRequestCount);
+            result.putLong("retransmitted_fragment_count", retransmittedFragmentCount);
+            result.putLong("receiver_completion_ack_count", receiverCompletionAckCount);
+            result.putLong("fragment_recovery_error_count", recoveryErrorCount);
             result.putString("last_payload_type", lastPayloadType);
             result.putString("last_receive_error", lastReceiveError);
             if (lastDeliveredChannel != null) {
@@ -1801,20 +2170,43 @@ public final class GatewayV2 {
         long workspaceId = extras.getLong("workspace_id", 0L);
         if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
         long sourceUserId = extras.getLong("sender_id_long", 42L);
+        String transferId = extras.getString("transfer_id", "0123456789abcdef");
         List<String> frames = RadioMessageFraming.split(
                 messageId,
                 content,
-                "0123456789abcdef",
+                transferId,
                 RadioMessageFraming.DEFAULT_CHUNK_BYTES
         );
         if (extras.getBoolean("reverse_order", false)) Collections.reverse(frames);
-        String deliveredChannel = testDeliveredChannel(extras);
-        for (String frame : frames) {
-            dispatchInboundTestContent(frame, workspaceId, sourceUserId, deliveredChannel);
+        int omitIndex = extras.getInt("omit_fragment_index", -1);
+        int onlyIndex = extras.getInt("only_fragment_index", -1);
+        if (omitIndex >= frames.size() || onlyIndex >= frames.size()) {
+            return error("INVALID_REQUEST", "Test fragment index is outside the generated transfer");
         }
+        String deliveredChannel = testDeliveredChannel(extras);
+        int dispatched = 0;
+        for (int index = 0; index < frames.size(); index++) {
+            if (index == omitIndex || (onlyIndex >= 0 && index != onlyIndex)) continue;
+            dispatchInboundTestContent(frames.get(index), workspaceId, sourceUserId, deliveredChannel);
+            dispatched++;
+        }
+        RadioMessageFraming.Frame first = RadioMessageFraming.parse(frames.get(0));
         Bundle result = ok("Test framed RouterPayloads dispatched");
         result.putInt("fragment_count", frames.size());
+        result.putInt("dispatch_count", dispatched);
+        result.putString("transfer_id", first == null ? null : first.transferId);
+        result.putLong("fragment_checksum", first == null ? 0L : first.checksum);
         return result;
+    }
+
+    /** Simulates gateway process-memory loss without deleting the private recovery journal. */
+    private static Bundle clearVolatileFragmentStateForTest() {
+        synchronized (LOCK) {
+            RADIO_REASSEMBLER.clear();
+            COMPLETED_FRAGMENT_TRANSFERS.clear();
+            RECOVERY_SCHEDULE_GENERATIONS.clear();
+        }
+        return ok("Volatile SC3 fragment state cleared; durable journal retained");
     }
 
     /** Exercises the fallback envelope and duplicate suppression in the real receive parser. */
@@ -2516,6 +2908,8 @@ public final class GatewayV2 {
             ROUTE_FALLBACKS.clear();
             RADIO_REASSEMBLER.clear();
             INBOUND_DEDUP.clear();
+            COMPLETED_FRAGMENT_TRANSFERS.clear();
+            RECOVERY_SCHEDULE_GENERATIONS.clear();
             compositePackager = null;
             fileRemoteSource = null;
         }
@@ -2548,6 +2942,7 @@ public final class GatewayV2 {
         try {
             ensureCoreStarted();
             ensurePayloadSubscription();
+            schedulePersistedRecoveryRequests();
             return ok("Gateway receive subscription active");
         } catch (Throwable error) {
             recordReceiveError("SUBSCRIBE", error);
@@ -2586,6 +2981,15 @@ public final class GatewayV2 {
             );
             Method onEach = flow.getClass().getMethod("onEach", function1);
             payloadSubscription = onEach.invoke(flow, callback);
+        }
+    }
+
+    private static void schedulePersistedRecoveryRequests() {
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        if (store == null) return;
+        for (FragmentRecoveryStore.IncomingRecord record :
+                store.listIncoming(System.currentTimeMillis())) {
+            scheduleRecoveryRequest(record);
         }
     }
 
@@ -2700,6 +3104,21 @@ public final class GatewayV2 {
             long receivedAt = timestamp == null ? now : timestamp.getTime();
             String senderId = String.valueOf(sourceUserId);
             String deliveredChannel = channel.toUpperCase(Locale.US);
+            final FragmentRecoveryProtocol.Control recoveryControl;
+            try {
+                recoveryControl = FragmentRecoveryProtocol.parse(content);
+            } catch (IllegalArgumentException invalidControl) {
+                synchronized (LOCK) {
+                    ignoredInboundCount++;
+                    recoveryErrorCount++;
+                }
+                recordReceiveError("RECOVERY_CONTROL", invalidControl);
+                return;
+            }
+            if (recoveryControl != null) {
+                handleFragmentRecoveryControl(recoveryControl, workspaceId, senderId, now);
+                return;
+            }
             final FallbackMessageEnvelope.Decoded fallbackEnvelope;
             try {
                 fallbackEnvelope = FallbackMessageEnvelope.parse(content);
@@ -2736,6 +3155,74 @@ public final class GatewayV2 {
                 }
                 return;
             }
+            RadioMessageFraming.Frame inboundFrame = null;
+            FragmentRecoveryStore.IncomingRecord persistedTransfer = null;
+            try {
+                inboundFrame = RadioMessageFraming.parse(content);
+                if (inboundFrame != null) {
+                    String completedKey = completedTransferKey(
+                            workspaceId,
+                            senderId,
+                            deliveredChannel,
+                            inboundFrame.transferId
+                    );
+                    if (COMPLETED_FRAGMENT_TRANSFERS.hasSeen(completedKey, now)) {
+                        sendRecoveryAckSafe(
+                                inboundFrame.transferId,
+                                inboundFrame.checksum,
+                                workspaceId
+                        );
+                        synchronized (LOCK) {
+                            ignoredInboundCount++;
+                        }
+                        return;
+                    }
+                    FragmentRecoveryStore store = fragmentRecoveryStore;
+                    if (store == null) {
+                        throw new IOException("Private fragment recovery journal is unavailable");
+                    }
+                    FragmentRecoveryStore.IncomingRecord previous = store.findIncoming(
+                            inboundFrame.transferId,
+                            workspaceId,
+                            senderId,
+                            deliveredChannel,
+                            now
+                    );
+                    if (previous != null && previous.isComplete()) {
+                        if (previous.checksum != inboundFrame.checksum
+                                || previous.fragmentCount != inboundFrame.count) {
+                            throw new IllegalArgumentException(
+                                    "Conflicting completed SC3 fragment metadata"
+                            );
+                        }
+                        COMPLETED_FRAGMENT_TRANSFERS.firstSeen(completedKey, now);
+                        sendRecoveryAckSafe(
+                                inboundFrame.transferId,
+                                inboundFrame.checksum,
+                                workspaceId
+                        );
+                        synchronized (LOCK) {
+                            ignoredInboundCount++;
+                        }
+                        return;
+                    }
+                    persistedTransfer = store.recordIncoming(
+                            content,
+                            workspaceId,
+                            senderId,
+                            deliveredChannel,
+                            now
+                    );
+                }
+            } catch (IllegalArgumentException | IOException persistenceFailure) {
+                synchronized (LOCK) {
+                    ignoredInboundCount++;
+                    invalidRadioFragmentCount++;
+                    recoveryErrorCount++;
+                }
+                recordReceiveError("RECOVERY_PERSIST", persistenceFailure);
+                return;
+            }
             RadioMessageReassembler.Result reassembly = RADIO_REASSEMBLER.accept(
                     content,
                     workspaceId,
@@ -2743,6 +3230,11 @@ public final class GatewayV2 {
                     deliveredChannel,
                     receivedAt
             );
+            if (persistedTransfer != null
+                    && persistedTransfer.isComplete()
+                    && reassembly.kind != RadioMessageReassembler.Result.Kind.COMPLETE) {
+                reassembly = reassemblePersistedTransfer(persistedTransfer);
+            }
             switch (reassembly.kind) {
                 case NOT_FRAME:
                     enqueueIncoming(
@@ -2758,11 +3250,24 @@ public final class GatewayV2 {
                     synchronized (LOCK) {
                         inboundRadioFragmentCount++;
                     }
+                    scheduleRecoveryRequest(persistedTransfer);
                     break;
                 case COMPLETE:
                     synchronized (LOCK) {
                         inboundRadioFragmentCount++;
                         completedRadioMessageCount++;
+                    }
+                    if (persistedTransfer != null) {
+                        cancelScheduledRecovery(persistedTransfer.key);
+                        COMPLETED_FRAGMENT_TRANSFERS.firstSeen(
+                                completedTransferKey(
+                                        workspaceId,
+                                        senderId,
+                                        deliveredChannel,
+                                        persistedTransfer.transferId
+                                ),
+                                now
+                        );
                     }
                     if (INBOUND_DEDUP.firstSeen(
                             dedupKey("message", workspaceId, senderId, reassembly.messageId),
@@ -2781,11 +3286,23 @@ public final class GatewayV2 {
                             ignoredInboundCount++;
                         }
                     }
+                    if (persistedTransfer != null) {
+                        sendRecoveryAckSafe(
+                                persistedTransfer.transferId,
+                                persistedTransfer.checksum,
+                                workspaceId
+                        );
+                    }
                     break;
                 case INVALID:
                     synchronized (LOCK) {
                         inboundRadioFragmentCount++;
                         invalidRadioFragmentCount++;
+                    }
+                    if (persistedTransfer != null) {
+                        cancelScheduledRecovery(persistedTransfer.key);
+                        FragmentRecoveryStore store = fragmentRecoveryStore;
+                        if (store != null) store.removeIncoming(persistedTransfer.key);
                     }
                     recordReceiveError("REASSEMBLY", new IllegalArgumentException());
                     break;
@@ -2794,6 +3311,104 @@ public final class GatewayV2 {
             // Never include payload content or exception messages in diagnostics.
             recordReceiveError("PARSE", error);
         }
+    }
+
+    private static void handleFragmentRecoveryControl(
+            FragmentRecoveryProtocol.Control control,
+            long workspaceId,
+            String senderId,
+            long now
+    ) throws Exception {
+        FragmentRecoveryStore store = fragmentRecoveryStore;
+        if (store == null) {
+            synchronized (LOCK) {
+                recoveryErrorCount++;
+            }
+            return;
+        }
+        if (control.kind == FragmentRecoveryProtocol.Control.Kind.REQUEST) {
+            FragmentRecoveryStore.OutgoingRecord outgoing = store.findOutgoing(
+                    control.transferId,
+                    control.checksum,
+                    workspaceId,
+                    now
+            );
+            if (outgoing == null) {
+                synchronized (LOCK) {
+                    ignoredInboundCount++;
+                }
+                return;
+            }
+            retransmitStoredFrames(outgoing, control.indexes);
+            return;
+        }
+
+        FragmentRecoveryStore.OutgoingRecord outgoing = store.findOutgoing(
+                control.transferId,
+                control.checksum,
+                workspaceId,
+                now
+        );
+        if (outgoing == null) {
+            synchronized (LOCK) {
+                ignoredInboundCount++;
+            }
+            return;
+        }
+        if (store.acknowledge(control.transferId, control.checksum, workspaceId, now)) {
+            synchronized (LOCK) {
+                receiverCompletionAckCount++;
+                Bundle delivery = DELIVERY.get(outgoing.messageId);
+                if (delivery != null) {
+                    delivery.putBoolean("receiver_confirmed", true);
+                    delivery.putLong("receiver_confirmed_at_ms", now);
+                }
+            }
+        }
+    }
+
+    private static RadioMessageReassembler.Result reassemblePersistedTransfer(
+            FragmentRecoveryStore.IncomingRecord record
+    ) {
+        RadioMessageReassembler restored = new RadioMessageReassembler();
+        RadioMessageReassembler.Result result = null;
+        for (String frame : record.frames) {
+            if (frame == null) continue;
+            result = restored.accept(
+                    frame,
+                    record.workspaceId,
+                    record.senderId,
+                    record.channel,
+                    record.lastReceivedAt
+            );
+        }
+        return result == null ? RadioMessageReassembler.Result.invalid(
+                "Persisted SC3 transfer contained no frames"
+        ) : result;
+    }
+
+    private static void sendRecoveryAckSafe(
+            String transferId,
+            long checksum,
+            long workspaceId
+    ) {
+        try {
+            sendRecoveryAck(transferId, checksum, workspaceId);
+        } catch (Throwable failure) {
+            synchronized (LOCK) {
+                recoveryErrorCount++;
+            }
+            recordReceiveError("RECOVERY_ACK", failure);
+        }
+    }
+
+    private static String completedTransferKey(
+            long workspaceId,
+            String senderId,
+            String channel,
+            String transferId
+    ) {
+        return workspaceId + "\u0000" + senderId + "\u0000" + channel + "\u0000" + transferId;
     }
 
     private static void recordReceiveError(String stage, Throwable error) {

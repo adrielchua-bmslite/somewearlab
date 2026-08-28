@@ -73,6 +73,20 @@ public interface SomewearClient : AutoCloseable {
 
     public fun incomingMessages(afterSequence: Long = 0L): Flow<IncomingMessage>
 
+    /** Durable Radio transfers that are waiting for one or more SC3 fragments. */
+    public suspend fun listIncompleteMessageTransfers():
+        SomewearResult<List<IncompleteMessageTransfer>>
+
+    /** Immediately requests the currently missing indexes from the original sender gateway. */
+    public suspend fun requestMissingMessageFragments(
+        transferId: String,
+    ): SomewearResult<FragmentRecoveryReceipt>
+
+    /** Re-queues every retained Radio fragment for an outbound message. */
+    public suspend fun retryFragmentedMessage(
+        messageId: String,
+    ): SomewearResult<FragmentRetryReceipt>
+
     /**
      * Uploads a file through the authenticated Somewear service, then sends a small
      * native FileMetadata payload through the requested Node channel.
@@ -82,12 +96,39 @@ public interface SomewearClient : AutoCloseable {
      */
     public suspend fun sendFile(request: FileSendRequest): SomewearResult<FileSendReceipt>
 
+    /** Uploads any non-empty number of files, then publishes their authoritative manifest last. */
+    public suspend fun sendFileBatch(
+        request: FileBatchSendRequest,
+    ): SomewearResult<FileBatchSendReceipt>
+
     public suspend fun pollIncomingFiles(
         afterSequence: Long,
         limit: Int = 50,
     ): SomewearResult<List<IncomingFile>>
 
     public fun incomingFiles(afterSequence: Long = 0L): Flow<IncomingFile>
+
+    /** Downloads and validates a manifest announced through [incomingFiles]. */
+    public suspend fun readFileBatchManifest(
+        file: IncomingFile,
+    ): SomewearResult<FileBatchManifest>
+
+    /** Downloads and validates a manifest found through [listWorkspaceFiles]. */
+    public suspend fun readFileBatchManifest(
+        file: WorkspaceFile,
+    ): SomewearResult<FileBatchManifest>
+
+    /** Compares the manifest's exact expected IDs with the remote catalogue and local cache. */
+    public suspend fun reconcileFileBatch(
+        manifest: FileBatchManifest,
+    ): SomewearResult<FileBatchReconciliation>
+
+    /** Downloads exactly the manifest entries, with size and SHA-256 verification. */
+    public fun syncFileBatch(
+        manifest: FileBatchManifest,
+        maxDownloadAttempts: Int = 3,
+        replaceCachedFiles: Boolean = false,
+    ): Flow<WorkspaceContentSyncEvent>
 
     /**
      * Returns one bounded page from the authenticated Somewear workspace file catalogue.

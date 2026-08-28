@@ -44,6 +44,7 @@ public enum class SomewearErrorCode {
     FILE_DOWNLOAD_FAILED,
     FILE_INTEGRITY_FAILED,
     FILE_CACHE_FAILED,
+    FRAGMENT_RECOVERY_FAILED,
     PAYLOAD_TOO_LARGE_FOR_RADIO,
     PAYLOAD_TOO_LARGE_FOR_SATELLITE,
     MALFORMED_RESPONSE,
@@ -260,6 +261,10 @@ public data class SendReceipt(
     val satelliteNativeComposite: Boolean = false,
     /** True when the Node must receive server/backhaul confirmation for this route. */
     val backhaulAckRequired: Boolean = false,
+    /** Present for SC3-fragmented Radio sends retained for selective retransmission. */
+    val transferId: String? = null,
+    /** True when the peer gateway can acknowledge successful SC3 reassembly. */
+    val receiverAcknowledgementAvailable: Boolean = false,
 )
 
 public enum class DeliveryStatus {
@@ -292,6 +297,36 @@ public data class DeliveryUpdate(
     val deliveredChannel: DeviceChannel,
     val errorReason: String?,
     val updatedAtEpochMillis: Long,
+    /** Stronger than Node delivery: the peer gateway rebuilt and accepted every fragment. */
+    val receiverConfirmed: Boolean = false,
+    val receiverConfirmedAtEpochMillis: Long? = null,
+)
+
+/** A Radio message whose SC3 transport fragments have not all arrived yet. */
+public data class IncompleteMessageTransfer(
+    val transferId: String,
+    val workspaceId: Long,
+    val senderId: String?,
+    val channel: DeviceChannel,
+    val expectedFragmentCount: Int,
+    val receivedFragmentCount: Int,
+    val missingFragmentIndexes: List<Int>,
+    val firstReceivedAtEpochMillis: Long,
+    val lastReceivedAtEpochMillis: Long,
+    val recoveryRequestCount: Int,
+    val lastRecoveryRequestAtEpochMillis: Long?,
+)
+
+public data class FragmentRecoveryReceipt(
+    val transferId: String,
+    val requestedFragmentCount: Int,
+    val recoveryRequestCount: Int,
+)
+
+public data class FragmentRetryReceipt(
+    val messageId: String,
+    val transferId: String,
+    val fragmentCount: Int,
 )
 
 public data class IncomingMessage(
@@ -336,6 +371,104 @@ public data class FileSendReceipt(
     val metadataDelivery: SendReceipt,
 )
 
+public object FileBatchFormat {
+    public const val MIME_TYPE: String = "application/vnd.sc3.file-batch+json"
+    public const val VERSION: Int = 1
+}
+
+public data class FileBatchItemRequest(
+    val sourceUri: Uri,
+    val fileName: String? = null,
+    val mimeType: String? = null,
+) {
+    init {
+        require(sourceUri.toString().isNotBlank()) { "sourceUri must not be empty" }
+        require(fileName == null || fileName.isNotBlank()) { "fileName must not be blank" }
+        require(mimeType == null || mimeType.isNotBlank()) { "mimeType must not be blank" }
+    }
+}
+
+/** A closed, variable-size set of workspace files announced by one manifest uploaded last. */
+public data class FileBatchSendRequest(
+    val workspaceId: Long,
+    val files: List<FileBatchItemRequest>,
+    val batchId: String = UUID.randomUUID().toString(),
+    val revision: Int = 1,
+    val finalRevision: Boolean = true,
+    val routePolicy: RoutePolicy = RoutePolicy.RADIO_ONLY,
+    val radioTimeoutMillis: Long = 30_000L,
+    val satelliteTimeoutMillis: Long = 300_000L,
+) {
+    init {
+        require(workspaceId > 0L) { "workspaceId must be positive" }
+        require(files.isNotEmpty()) { "files must not be empty" }
+        require(batchId.matches(Regex("[A-Za-z0-9_-]{8,64}"))) {
+            "batchId must be 8..64 URL-safe characters"
+        }
+        require(revision > 0) { "revision must be positive" }
+        require(radioTimeoutMillis > 0L) { "radioTimeoutMillis must be positive" }
+        require(satelliteTimeoutMillis > 0L) { "satelliteTimeoutMillis must be positive" }
+    }
+}
+
+public data class FileBatchEntry(
+    val index: Int,
+    val fileId: String,
+    val fileName: String,
+    val mimeType: String?,
+    val sizeBytes: Long,
+    val sha256: String,
+) {
+    init {
+        require(index >= 0) { "index must be non-negative" }
+        require(fileId.isNotBlank()) { "fileId must not be blank" }
+        require(fileName.isNotBlank()) { "fileName must not be blank" }
+        require(sizeBytes >= 0L) { "sizeBytes must be non-negative" }
+        require(sha256.matches(Regex("[0-9a-f]{64}"))) {
+            "sha256 must be lowercase hexadecimal"
+        }
+    }
+}
+
+public data class FileBatchManifest(
+    val batchId: String,
+    val workspaceId: Long,
+    val revision: Int,
+    val finalRevision: Boolean,
+    val expectedFileCount: Int,
+    val createdAtEpochMillis: Long,
+    val files: List<FileBatchEntry>,
+) {
+    init {
+        require(batchId.matches(Regex("[A-Za-z0-9_-]{8,64}"))) { "Invalid batchId" }
+        require(workspaceId > 0L) { "workspaceId must be positive" }
+        require(revision > 0) { "revision must be positive" }
+        require(expectedFileCount >= 0) { "expectedFileCount must be non-negative" }
+        require(files.size == expectedFileCount) {
+            "A complete manifest must contain exactly expectedFileCount entries"
+        }
+        require(files.map { it.index } == files.indices.toList()) {
+            "Manifest file indexes must be contiguous and ordered"
+        }
+        require(files.map { it.fileId }.distinct().size == files.size) {
+            "Manifest file IDs must be unique"
+        }
+    }
+}
+
+public data class FileBatchSendReceipt(
+    val manifest: FileBatchManifest,
+    val files: List<FileSendReceipt>,
+    val manifestFile: FileSendReceipt,
+)
+
+public data class FileBatchReconciliation(
+    val manifest: FileBatchManifest,
+    val availableFiles: List<WorkspaceFile>,
+    val missingFileIds: Set<String>,
+    val cachedFileIds: Set<String>,
+)
+
 public data class IncomingFile(
     val sequence: Long,
     val messageId: String,
@@ -350,7 +483,10 @@ public data class IncomingFile(
     val uploadedAtEpochMillis: Long?,
     val receivedAtEpochMillis: Long,
     val channel: DeviceChannel,
-)
+) {
+    public val isFileBatchManifest: Boolean
+        get() = mimeType.equals(FileBatchFormat.MIME_TYPE, ignoreCase = true)
+}
 
 public data class FileDownloadReceipt(
     val fileId: String,
@@ -382,6 +518,9 @@ public data class WorkspaceFile(
             "mediaDurationMillis must be non-negative"
         }
     }
+
+    public val isFileBatchManifest: Boolean
+        get() = mimeType.equals(FileBatchFormat.MIME_TYPE, ignoreCase = true)
 }
 
 /** One bounded page; [nextOffset] is null after the final page. */
@@ -400,6 +539,8 @@ public data class WorkspaceContentSyncRequest(
     val pageSize: Int = 100,
     val maxDownloadAttempts: Int = 3,
     val replaceCachedFiles: Boolean = false,
+    /** Optional end-to-end hashes, normally supplied by a [FileBatchManifest]. */
+    val expectedSha256ByFileId: Map<String, String> = emptyMap(),
 ) {
     init {
         require(workspaceId > 0L) { "workspaceId must be positive" }
@@ -407,6 +548,12 @@ public data class WorkspaceContentSyncRequest(
         require(pageSize in 1..500) { "pageSize must be between 1 and 500" }
         require(maxDownloadAttempts in 1..10) {
             "maxDownloadAttempts must be between 1 and 10"
+        }
+        require(expectedSha256ByFileId.keys.none(String::isBlank)) {
+            "expectedSha256ByFileId must not contain blank file IDs"
+        }
+        require(expectedSha256ByFileId.values.all { it.matches(Regex("[0-9a-f]{64}")) }) {
+            "expectedSha256ByFileId values must be lowercase SHA-256 hexadecimal"
         }
     }
 }
@@ -473,6 +620,10 @@ public data class ReceiveHealth(
     val lastPayloadStatus: String? = null,
     val lastPayloadOutbound: Boolean? = null,
     val lastPayloadParcelId: Int? = null,
+    val fragmentRecoveryRequestCount: Long = 0L,
+    val retransmittedFragmentCount: Long = 0L,
+    val receiverCompletionAckCount: Long = 0L,
+    val fragmentRecoveryErrorCount: Long = 0L,
 )
 
 public data class WorkspaceInfo(
