@@ -53,6 +53,7 @@ public object SomewearGatewayContract {
         internal const val PREPARE_FILE_UPLOAD: String = "prepareFileUpload"
         internal const val SEND_FILE_METADATA: String = "sendFileMetadata"
         public const val POLL_INCOMING_FILES: String = "pollIncomingFiles"
+        public const val LIST_WORKSPACE_FILES: String = "listWorkspaceFiles"
         internal const val GET_FILE_DOWNLOAD_URL: String = "getFileDownloadUrl"
         public const val GET_RECEIVE_HEALTH: String = "getReceiveHealth"
         internal const val START_RECEIVING: String = "startReceiving"
@@ -149,6 +150,8 @@ public object SomewearGatewayContract {
         public const val FILE_USER_ID: String = "file_user_id"
         public const val FILE_CREATED_AT_MS: String = "file_created_at_ms"
         public const val FILE_UPLOADED_AT_MS: String = "file_uploaded_at_ms"
+        public const val FILE_IS_VOICE_RECORDING: String = "file_is_voice_recording"
+        public const val FILE_MEDIA_DURATION_MS: String = "file_media_duration_ms"
         internal const val FILE_DOWNLOAD_URL: String = "file_download_url"
 
         public const val DELIVERY_STATUS: String = "delivery_status"
@@ -158,6 +161,9 @@ public object SomewearGatewayContract {
 
         public const val AFTER_SEQUENCE: String = "after_sequence"
         public const val LIMIT: String = "limit"
+        public const val OFFSET: String = "offset"
+        public const val NEXT_OFFSET: String = "next_offset"
+        public const val TOTAL_COUNT: String = "total_count"
         public const val ITEMS: String = "items"
         public const val SEQUENCE: String = "sequence"
         public const val SENDER_ID: String = "sender_id"

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="com.somewearlabs.swtak.plugin.permission.SOMEWEAR_GATEWAY" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
         <package android:name="com.somewearlabs.swtak.plugin" />
@@ -13,5 +14,9 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:theme="@android:style/Theme.Material.NoActionBar" />
+        <activity
+            android:name=".WorkspaceContentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
     </application>
 </manifest>

@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v15. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v16. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;
@@ -24,6 +24,9 @@
 - exposes the retained cloud-backed file workflow: signed upload preparation,
   native `FileMetadataPayload` send/receive, and signed download preparation;
   large file bytes never cross the ContentProvider extras Bundle.
+- exposes the authenticated `FileService/GetFiles` workspace catalogue as
+  bounded metadata pages so the SDK can recover files whose Node announcement
+  was missed without exposing the retained gRPC client to SC3.
 - preflights the fully encoded Somewear package and carries oversized
   `RADIO_ONLY` JSON as checksummed ordinary radio `MessagePayload` records,
   with bounded receiver-side reassembly and aggregate delivery status;

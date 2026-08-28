@@ -269,6 +269,18 @@ public final class Main {
                     "GatewayV2 must expose retained QR-invite enrollment and synchronization"
             );
         }
+        if (!helperSource.contains(
+                        "if (\"listWorkspaceFiles\".equals(method)) return listWorkspaceFiles(extras)"
+                )
+                || !helperSource.contains("workspace_file_catalog")
+                || !helperSource.contains("getGetFilesMethod")
+                || !sdkClientSource.contains(" listWorkspaceFiles(")
+                || !sdkClientSource.contains(" syncWorkspaceContent(")
+                || !sdkClientSource.contains(" cachedWorkspaceFiles(")) {
+            throw new IllegalStateException(
+                    "Gateway/SDK must expose workspace catalogue and SDK-owned missing-file recovery"
+            );
+        }
         if (!scannerSource.contains("com.budiyev.android.codescanner.CodeScannerView")
                 || !scannerSource.contains("com.google.zxing.BarcodeFormat")
                 || !scannerSource.contains("EXTRA_INVITE_CODE")
@@ -401,6 +413,10 @@ public final class Main {
                 "com/sc3/somewear/sdk/WorkspaceInviteCode.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScanContract.class",
                 "com/sc3/somewear/sdk/WorkspaceQrScannerActivity.class",
+                "com/sc3/somewear/sdk/WorkspaceContentActivity.class",
+                "com/sc3/somewear/sdk/WorkspaceFile.class",
+                "com/sc3/somewear/sdk/WorkspaceFilePage.class",
+                "com/sc3/somewear/sdk/WorkspaceContentSyncRequest.class",
                 "com/sc3/somewear/sdk/SendRequest.class",
                 "com/sc3/somewear/sdk/FileSendRequest.class",
                 "com/sc3/somewear/sdk/SendReceipt.class"
@@ -446,6 +462,10 @@ public final class Main {
                 "setEnduranceModeEnabled",
                 "setDeviceButtonFunction",
                 "setNodeConnectionMode",
+                "listWorkspaceFiles",
+                "downloadWorkspaceFile",
+                "cachedWorkspaceFiles",
+                "syncWorkspaceContent",
                 "factoryReset"
         );
         for (String method : requiredMethods) {
@@ -454,8 +474,12 @@ public final class Main {
             }
         }
         if (manifest.contains("android.permission.CAMERA")
-                || !manifest.contains("WorkspaceQrScannerActivity")) {
-            throw new IllegalStateException("SDK AAR is missing the QR scanner manifest contract");
+                || !manifest.contains("WorkspaceQrScannerActivity")
+                || !manifest.contains("WorkspaceContentActivity")
+                || !manifest.contains("android.permission.INTERNET")) {
+            throw new IllegalStateException(
+                    "SDK AAR is missing its QR/content activity or network manifest contract"
+            );
         }
     }
 
@@ -469,6 +493,7 @@ public final class Main {
         boolean satelliteBackhaulAck = false;
         boolean legacySatelliteReassembly = false;
         boolean transmissionEstimate = false;
+        boolean workspaceFileCatalog = false;
         boolean providerClass = false;
         boolean gatewayV2Class = false;
         try (ZipFile archive = new ZipFile(apk.toFile())) {
@@ -496,6 +521,9 @@ public final class Main {
                         "satellite_fragment_reassembly_legacy"
                 );
                 transmissionEstimate |= dex.contains("estimated_transmission_count");
+                workspaceFileCatalog |= dex.contains("workspace_file_catalog")
+                        && dex.contains("listWorkspaceFiles")
+                        && dex.contains("getGetFilesMethod");
             }
         }
         if (!providerClass
@@ -508,13 +536,14 @@ public final class Main {
                 || !satelliteNativeComposite
                 || !satelliteBackhaulAck
                 || !legacySatelliteReassembly
-                || !transmissionEstimate) {
+                || !transmissionEstimate
+                || !workspaceFileCatalog) {
             throw new IllegalStateException(
                     "base APK is missing its provider/helper class definition, controlled fallback,"
-                            + " or native Satellite composite contract"
+                            + " native Satellite composite, or workspace file catalogue contract"
             );
         }
-        System.out.println("gateway_radio_satellite_transport_contract=OK");
+        System.out.println("gateway_radio_satellite_content_contract=OK");
     }
 
     /** Returns the class descriptors that are defined, rather than merely referenced, by a DEX. */

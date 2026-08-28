@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -25,6 +26,8 @@ internal class ContentProviderSomewearClient(
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
     private val gatewayUri = Uri.parse("content://${config.authority}")
+    private val workspaceContentStore = WorkspaceContentStore(appContext)
+    private val workspaceContentSyncMutex = Mutex()
     private val bindingLock = Any()
     @Volatile private var bindingRequested = false
     @Volatile private var serviceConnected = false
@@ -561,43 +564,273 @@ internal class ContentProviderSomewearClient(
         }
     }
 
+    override suspend fun listWorkspaceFiles(
+        workspaceId: Long,
+        offset: Int,
+        limit: Int,
+    ): SomewearResult<WorkspaceFilePage> {
+        if (workspaceId <= 0L || offset < 0 || limit !in 1..500) {
+            return invalid(
+                SomewearGatewayContract.Method.LIST_WORKSPACE_FILES,
+                "workspaceId must be positive, offset non-negative, and limit between 1 and 500",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.LIST_WORKSPACE_FILES,
+            Bundle().apply {
+                putLong(SomewearGatewayContract.Key.WORKSPACE_ID, workspaceId)
+                putInt(SomewearGatewayContract.Key.OFFSET, offset)
+                putInt(SomewearGatewayContract.Key.LIMIT, limit)
+            },
+        ).map { bundle ->
+            WorkspaceFilePage(
+                files = bundle
+                    .bundleList(SomewearGatewayContract.Key.ITEMS)
+                    .map(::parseWorkspaceFile),
+                totalCount = bundle.getInt(SomewearGatewayContract.Key.TOTAL_COUNT, 0),
+                offset = bundle.getInt(SomewearGatewayContract.Key.OFFSET, offset),
+                nextOffset = bundle
+                    .getInt(SomewearGatewayContract.Key.NEXT_OFFSET, -1)
+                    .takeIf { it >= 0 },
+            )
+        }
+    }
+
     override suspend fun downloadFile(
         file: IncomingFile,
         destinationUri: Uri,
     ): SomewearResult<FileDownloadReceipt> = withContext(Dispatchers.IO) {
-        val ticket = call(
-            SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
-            Bundle().apply {
-                putString(SomewearGatewayContract.Key.FILE_ID, file.fileId)
-                putLong(SomewearGatewayContract.Key.WORKSPACE_ID, file.workspaceId)
-            },
-        )
+        val ticket = requestFileDownloadUrl(file.fileId, file.workspaceId)
         if (ticket is SomewearResult.Failure) return@withContext ticket
         ticket as SomewearResult.Success
-        val downloadUrl = ticket.value.getString(SomewearGatewayContract.Key.FILE_DOWNLOAD_URL)
-            ?: return@withContext malformed(
-                SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
-                "Gateway omitted the file download ticket",
-            )
         try {
             SomewearResult.Success(
                 FileDownloadReceipt(
                     fileId = file.fileId,
                     destinationUri = destinationUri,
-                    bytesWritten = downloadToLocalFile(resolver, downloadUrl, destinationUri),
+                    bytesWritten = downloadToLocalFile(resolver, ticket.value, destinationUri),
                 ),
             )
         } catch (exception: Exception) {
-            SomewearResult.Failure(
-                SomewearError(
-                    SomewearErrorCode.FILE_DOWNLOAD_FAILED,
-                    exception.message ?: "Could not download the file",
-                    SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
-                    exception,
-                ),
-            )
+            SomewearResult.Failure(fileDownloadError(exception))
         }
     }
+
+    override suspend fun downloadWorkspaceFile(
+        file: WorkspaceFile,
+        destinationUri: Uri,
+    ): SomewearResult<FileDownloadReceipt> = withContext(Dispatchers.IO) {
+        val ticket = requestFileDownloadUrl(file.fileId, file.workspaceId)
+        if (ticket is SomewearResult.Failure) return@withContext ticket
+        ticket as SomewearResult.Success
+        try {
+            SomewearResult.Success(
+                FileDownloadReceipt(
+                    fileId = file.fileId,
+                    destinationUri = destinationUri,
+                    bytesWritten = downloadToLocalFile(resolver, ticket.value, destinationUri),
+                ),
+            )
+        } catch (exception: Exception) {
+            SomewearResult.Failure(fileDownloadError(exception))
+        }
+    }
+
+    override suspend fun cachedWorkspaceFiles(
+        workspaceId: Long,
+    ): SomewearResult<List<WorkspaceFile>> = withContext(Dispatchers.IO) {
+        if (workspaceId <= 0L) {
+            return@withContext invalid(
+                SomewearGatewayContract.Method.LIST_WORKSPACE_FILES,
+                "workspaceId must be positive",
+            )
+        }
+        SomewearResult.Success(workspaceContentStore.readCatalogue(workspaceId))
+    }
+
+    override fun syncWorkspaceContent(
+        request: WorkspaceContentSyncRequest,
+    ): Flow<WorkspaceContentSyncEvent> = flow {
+        workspaceContentSyncMutex.lock()
+        try {
+            emit(WorkspaceContentSyncEvent.Started(request.workspaceId))
+            val catalogue = mutableListOf<WorkspaceFile>()
+            var offset = 0
+            do {
+                when (
+                    val page = listWorkspaceFiles(
+                        request.workspaceId,
+                        offset,
+                        request.pageSize,
+                    )
+                ) {
+                    is SomewearResult.Failure -> {
+                        emit(WorkspaceContentSyncEvent.Failed(page.error))
+                        return@flow
+                    }
+                    is SomewearResult.Success -> {
+                        catalogue += page.value.files
+                        offset = page.value.nextOffset ?: -1
+                    }
+                }
+            } while (offset >= 0)
+
+            try {
+                withContext(Dispatchers.IO) {
+                    workspaceContentStore.saveCatalogue(request.workspaceId, catalogue)
+                }
+            } catch (exception: Exception) {
+                emit(
+                    WorkspaceContentSyncEvent.Failed(
+                        SomewearError(
+                            SomewearErrorCode.FILE_CACHE_FAILED,
+                            exception.message ?: "Could not save the workspace content catalogue",
+                            SomewearGatewayContract.Method.LIST_WORKSPACE_FILES,
+                            exception,
+                        ),
+                    ),
+                )
+                return@flow
+            }
+
+            val currentCatalogue = catalogue.map(workspaceContentStore::attachCacheState)
+            emit(
+                WorkspaceContentSyncEvent.CatalogueLoaded(
+                    request.workspaceId,
+                    currentCatalogue,
+                ),
+            )
+
+            val selection = selectWorkspaceContent(currentCatalogue, request.fileIds)
+            val selectedFiles = selection.selectedFiles
+            val missingIds = selection.missingFileIds
+            if (missingIds.isNotEmpty()) {
+                emit(WorkspaceContentSyncEvent.NotFound(missingIds))
+            }
+
+            var downloadedCount = 0
+            var cachedCount = 0
+            var failedCount = 0
+            for (remoteFile in selectedFiles) {
+                val cachedFile = workspaceContentStore.attachCacheState(remoteFile)
+                if (!request.replaceCachedFiles && cachedFile.cachedUri != null) {
+                    cachedCount++
+                    emit(WorkspaceContentSyncEvent.AlreadyCached(cachedFile))
+                    continue
+                }
+
+                var lastError: SomewearError? = null
+                var completed: WorkspaceFile? = null
+                for (attempt in 1..request.maxDownloadAttempts) {
+                    emit(
+                        WorkspaceContentSyncEvent.Downloading(
+                            remoteFile,
+                            attempt,
+                            request.maxDownloadAttempts,
+                        ),
+                    )
+                    val ticket = requestFileDownloadUrl(
+                        remoteFile.fileId,
+                        remoteFile.workspaceId,
+                    )
+                    if (ticket is SomewearResult.Failure) {
+                        lastError = ticket.error
+                    } else {
+                        ticket as SomewearResult.Success
+                        try {
+                            withContext(Dispatchers.IO) {
+                                downloadToManagedFile(
+                                    ticket.value,
+                                    workspaceContentStore.contentFile(remoteFile),
+                                    remoteFile.sizeBytes,
+                                )
+                            }
+                            completed = workspaceContentStore.attachCacheState(remoteFile)
+                            break
+                        } catch (exception: Exception) {
+                            lastError = fileDownloadError(exception)
+                        }
+                    }
+                    if (attempt < request.maxDownloadAttempts) {
+                        delay((250L shl (attempt - 1)).coerceAtMost(2_000L))
+                    }
+                }
+
+                if (completed != null) {
+                    downloadedCount++
+                    emit(WorkspaceContentSyncEvent.Downloaded(completed))
+                } else {
+                    failedCount++
+                    emit(
+                        WorkspaceContentSyncEvent.FileFailed(
+                            remoteFile,
+                            lastError ?: SomewearError(
+                                SomewearErrorCode.FILE_DOWNLOAD_FAILED,
+                                "Somewear file download failed",
+                                SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                            ),
+                        ),
+                    )
+                }
+            }
+
+            emit(
+                WorkspaceContentSyncEvent.Completed(
+                    WorkspaceContentSyncSummary(
+                        workspaceId = request.workspaceId,
+                        discoveredCount = currentCatalogue.size,
+                        requestedCount = selectedFiles.size,
+                        downloadedCount = downloadedCount,
+                        alreadyCachedCount = cachedCount,
+                        failedCount = failedCount,
+                        notFoundCount = missingIds.size,
+                    ),
+                ),
+            )
+        } finally {
+            workspaceContentSyncMutex.unlock()
+        }
+    }
+
+    private suspend fun requestFileDownloadUrl(
+        fileId: String,
+        workspaceId: Long,
+    ): SomewearResult<String> {
+        if (fileId.isBlank() || workspaceId <= 0L) {
+            return invalid(
+                SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                "fileId must not be blank and workspaceId must be positive",
+            )
+        }
+        return when (val ticket = call(
+            SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+            Bundle().apply {
+                putString(SomewearGatewayContract.Key.FILE_ID, fileId)
+                putLong(SomewearGatewayContract.Key.WORKSPACE_ID, workspaceId)
+            },
+        )) {
+            is SomewearResult.Failure -> ticket
+            is SomewearResult.Success -> {
+                val url = ticket.value.getString(SomewearGatewayContract.Key.FILE_DOWNLOAD_URL)
+                    ?: return malformed(
+                        SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+                        "Gateway omitted the file download ticket",
+                    )
+                SomewearResult.Success(url)
+            }
+        }
+    }
+
+    private fun fileDownloadError(exception: Exception): SomewearError = SomewearError(
+        code = if (exception is FileSizeMismatchException) {
+            SomewearErrorCode.FILE_INTEGRITY_FAILED
+        } else {
+            SomewearErrorCode.FILE_DOWNLOAD_FAILED
+        },
+        message = exception.message ?: "Could not download the file",
+        method = SomewearGatewayContract.Method.GET_FILE_DOWNLOAD_URL,
+        cause = exception,
+    )
 
     override suspend fun receiveHealth(): SomewearResult<ReceiveHealth> =
         call(SomewearGatewayContract.Method.GET_RECEIVE_HEALTH).map { bundle ->
@@ -1125,6 +1358,31 @@ internal class ContentProviderSomewearClient(
         ),
     )
 
+    private fun parseWorkspaceFile(bundle: Bundle): WorkspaceFile {
+        val file = WorkspaceFile(
+            fileId = bundle.getString(SomewearGatewayContract.Key.FILE_ID).orEmpty(),
+            fileName = bundle.getString(SomewearGatewayContract.Key.FILE_NAME).orEmpty(),
+            mimeType = bundle.getString(SomewearGatewayContract.Key.MIME_TYPE),
+            sizeBytes = bundle.getLong(SomewearGatewayContract.Key.FILE_SIZE_BYTES),
+            workspaceId = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
+            fileOwnerUserId = bundle.getString(SomewearGatewayContract.Key.FILE_USER_ID),
+            createdAtEpochMillis = bundle.positiveLongOrNull(
+                SomewearGatewayContract.Key.FILE_CREATED_AT_MS,
+            ),
+            uploadedAtEpochMillis = bundle.positiveLongOrNull(
+                SomewearGatewayContract.Key.FILE_UPLOADED_AT_MS,
+            ),
+            isVoiceRecording = bundle.getBoolean(
+                SomewearGatewayContract.Key.FILE_IS_VOICE_RECORDING,
+                false,
+            ),
+            mediaDurationMillis = bundle.optionalInt(
+                SomewearGatewayContract.Key.FILE_MEDIA_DURATION_MS,
+            ),
+        )
+        return workspaceContentStore.attachCacheState(file)
+    }
+
     private fun parseWorkspaceInfo(bundle: Bundle): WorkspaceInfo = WorkspaceInfo(
         id = bundle.getLong(SomewearGatewayContract.Key.WORKSPACE_ID),
         name = bundle.getString(SomewearGatewayContract.Key.WORKSPACE_NAME),
@@ -1163,8 +1421,11 @@ internal class ContentProviderSomewearClient(
             "RECEIVE_FAILED" -> SomewearErrorCode.RECEIVE_FAILED
             "SEND_FAILED" -> SomewearErrorCode.SEND_FAILED
             "FILE_READ_FAILED" -> SomewearErrorCode.FILE_READ_FAILED
+            "FILE_LIST_FAILED" -> SomewearErrorCode.FILE_LIST_FAILED
             "FILE_UPLOAD_FAILED" -> SomewearErrorCode.FILE_UPLOAD_FAILED
             "FILE_DOWNLOAD_FAILED" -> SomewearErrorCode.FILE_DOWNLOAD_FAILED
+            "FILE_INTEGRITY_FAILED" -> SomewearErrorCode.FILE_INTEGRITY_FAILED
+            "PERMISSION_DENIED" -> SomewearErrorCode.PERMISSION_DENIED
             "PAYLOAD_TOO_LARGE_FOR_RADIO" -> SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_RADIO
             "PAYLOAD_TOO_LARGE_FOR_SATELLITE" ->
                 SomewearErrorCode.PAYLOAD_TOO_LARGE_FOR_SATELLITE

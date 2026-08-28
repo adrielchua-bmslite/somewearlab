@@ -39,8 +39,11 @@ public enum class SomewearErrorCode {
     RECEIVE_FAILED,
     SEND_FAILED,
     FILE_READ_FAILED,
+    FILE_LIST_FAILED,
     FILE_UPLOAD_FAILED,
     FILE_DOWNLOAD_FAILED,
+    FILE_INTEGRITY_FAILED,
+    FILE_CACHE_FAILED,
     PAYLOAD_TOO_LARGE_FOR_RADIO,
     PAYLOAD_TOO_LARGE_FOR_SATELLITE,
     MALFORMED_RESPONSE,
@@ -354,6 +357,99 @@ public data class FileDownloadReceipt(
     val destinationUri: Uri,
     val bytesWritten: Long,
 )
+
+/** Cloud-backed file metadata returned by the authenticated workspace catalogue. */
+public data class WorkspaceFile(
+    val fileId: String,
+    val fileName: String,
+    val mimeType: String?,
+    val sizeBytes: Long,
+    val workspaceId: Long,
+    val fileOwnerUserId: String?,
+    val createdAtEpochMillis: Long?,
+    val uploadedAtEpochMillis: Long?,
+    val isVoiceRecording: Boolean = false,
+    val mediaDurationMillis: Int? = null,
+    /** App-private SDK-managed copy, when one has been downloaded and size-verified. */
+    val cachedUri: Uri? = null,
+) {
+    init {
+        require(fileId.isNotBlank()) { "fileId must not be blank" }
+        require(fileName.isNotBlank()) { "fileName must not be blank" }
+        require(sizeBytes >= 0L) { "sizeBytes must be non-negative" }
+        require(workspaceId > 0L) { "workspaceId must be positive" }
+        require(mediaDurationMillis == null || mediaDurationMillis >= 0) {
+            "mediaDurationMillis must be non-negative"
+        }
+    }
+}
+
+/** One bounded page; [nextOffset] is null after the final page. */
+public data class WorkspaceFilePage(
+    val files: List<WorkspaceFile>,
+    val totalCount: Int,
+    val offset: Int,
+    val nextOffset: Int?,
+)
+
+/** Controls the SDK-owned catalogue comparison and app-private download cache. */
+public data class WorkspaceContentSyncRequest(
+    val workspaceId: Long,
+    /** Empty means every catalogue entry; otherwise only these exact file IDs are requested. */
+    val fileIds: Set<String> = emptySet(),
+    val pageSize: Int = 100,
+    val maxDownloadAttempts: Int = 3,
+    val replaceCachedFiles: Boolean = false,
+) {
+    init {
+        require(workspaceId > 0L) { "workspaceId must be positive" }
+        require(fileIds.none(String::isBlank)) { "fileIds must not contain blank values" }
+        require(pageSize in 1..500) { "pageSize must be between 1 and 500" }
+        require(maxDownloadAttempts in 1..10) {
+            "maxDownloadAttempts must be between 1 and 10"
+        }
+    }
+}
+
+public data class WorkspaceContentSyncSummary(
+    val workspaceId: Long,
+    val discoveredCount: Int,
+    val requestedCount: Int,
+    val downloadedCount: Int,
+    val alreadyCachedCount: Int,
+    val failedCount: Int,
+    val notFoundCount: Int,
+)
+
+/** Progress from [SomewearClient.syncWorkspaceContent]. */
+public sealed interface WorkspaceContentSyncEvent {
+    public data class Started(public val workspaceId: Long) : WorkspaceContentSyncEvent
+
+    public data class CatalogueLoaded(
+        public val workspaceId: Long,
+        public val files: List<WorkspaceFile>,
+    ) : WorkspaceContentSyncEvent
+
+    public data class Downloading(
+        public val file: WorkspaceFile,
+        public val attempt: Int,
+        public val maxAttempts: Int,
+    ) : WorkspaceContentSyncEvent
+
+    public data class Downloaded(public val file: WorkspaceFile) : WorkspaceContentSyncEvent
+    public data class AlreadyCached(public val file: WorkspaceFile) : WorkspaceContentSyncEvent
+
+    public data class FileFailed(
+        public val file: WorkspaceFile,
+        public val error: SomewearError,
+    ) : WorkspaceContentSyncEvent
+
+    public data class NotFound(public val fileIds: Set<String>) : WorkspaceContentSyncEvent
+
+    public data class Failed(public val error: SomewearError) : WorkspaceContentSyncEvent
+    public data class Completed(public val summary: WorkspaceContentSyncSummary) :
+        WorkspaceContentSyncEvent
+}
 
 /** Safe receive-pipeline telemetry. It never contains payload or workspace secrets. */
 public data class ReceiveHealth(

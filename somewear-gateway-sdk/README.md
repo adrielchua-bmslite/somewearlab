@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v15 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, SC3 Radio fragmentation, native Somewear Satellite composite transport, legacy v14 Satellite-frame receive compatibility, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
+The SDK exposes the complete SC3-facing contract. Gateway v16 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, authenticated workspace file catalogues, SDK-owned missing-file recovery, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, SC3 Radio fragmentation, native Somewear Satellite composite transport, legacy v14 Satellite-frame receive compatibility, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -29,6 +29,10 @@ The SDK intentionally refuses to use the gateway's legacy `sendMessage` method. 
 See [`FILE_API_TEST_REPORT.md`](FILE_API_TEST_REPORT.md) for the exact file,
 telemetry, and two-emulator regression evidence and the remaining physical/cloud
 acceptance boundary.
+
+See [`WORKSPACE_CONTENT_SYNC_TEST_REPORT.md`](WORKSPACE_CONTENT_SYNC_TEST_REPORT.md)
+for the v16 catalogue, selective recovery, atomic large-download tests, rebuilt
+artifact verification, and live authenticated acceptance boundary.
 
 See [`RADIO_SATELLITE_FALLBACK_TEST_REPORT.md`](RADIO_SATELLITE_FALLBACK_TEST_REPORT.md)
 for the route-state race tests, two-emulator APK evidence, duplicate suppression,
@@ -45,7 +49,7 @@ cancellation result, and remaining over-air acceptance boundary.
 - Camera permission granted to the separately installed gateway. SC3 itself does
   not need CameraX, ML Kit, or a Camera permission for workspace scanning.
 - Internet access while accepting a service-token invite, synchronizing workspaces,
-  uploading a file, or downloading a received file.
+  uploading a file, listing workspace content, or downloading a received file.
 - A provisioned Somewear Node and compatible Somewear workspace/mesh keys.
 - For Bluetooth: Android Bluetooth permissions and a bonded Somewear Node.
 - For USB: Android USB-host/OTG support, a data cable, and a Node model that supports USB.
@@ -626,6 +630,63 @@ when (val downloaded = somewear.downloadFile(incomingFile, destinationUri)) {
 }
 ```
 
+Missing a Radio/Satellite metadata announcement no longer makes a cloud file
+undiscoverable. Read the authenticated workspace catalogue directly:
+
+```kotlin
+when (val page = somewear.listWorkspaceFiles(workspaceId, offset = 0, limit = 100)) {
+    is SomewearResult.Success -> renderFiles(page.value.files)
+    is SomewearResult.Failure -> showError(page.error)
+}
+```
+
+Let the SDK find and recover every missing file into its app-private cache:
+
+```kotlin
+lifecycleScope.launch {
+    somewear.syncWorkspaceContent(
+        WorkspaceContentSyncRequest(
+            workspaceId = workspaceId,
+            maxDownloadAttempts = 3,
+        ),
+    ).collect { event ->
+        when (event) {
+            is WorkspaceContentSyncEvent.Downloaded -> use(event.file.cachedUri!!)
+            is WorkspaceContentSyncEvent.FileFailed -> showError(event.error)
+            is WorkspaceContentSyncEvent.Completed -> renderSummary(event.summary)
+            else -> renderProgress(event)
+        }
+    }
+}
+```
+
+If SC3 knows exact file IDs that are missing, request only those IDs. Unknown IDs
+are reported through `WorkspaceContentSyncEvent.NotFound`:
+
+```kotlin
+somewear.syncWorkspaceContent(
+    WorkspaceContentSyncRequest(
+        workspaceId = workspaceId,
+        fileIds = setOf("file-id-17", "file-id-22"),
+    ),
+).collect(::renderContentSync)
+```
+
+The sync operation obtains a fresh signed URL for every retry, streams into a
+temporary file, verifies the byte count from Somewear metadata, and atomically
+publishes only a complete file. It uses at most three attempts by default. The
+last catalogue remains available offline through `cachedWorkspaceFiles()`.
+
+SC3 can launch the SDK-owned content page instead of implementing this UI:
+
+```kotlin
+startActivity(WorkspaceContentActivity.createIntent(this, workspaceId))
+```
+
+The page lists remote content, shows local status, downloads one selected file,
+or downloads all missing files. It uses app-private storage and requires no
+storage permission or C2 transport/reassembly code.
+
 `FileSendReceipt.metadataDelivery` is queue acceptance for the small
 announcement. Continue with `deliveryStatus()` or `observeDeliveryStatus()` to
 confirm its terminal channel/status. A successful upload alone does not prove
@@ -633,6 +694,13 @@ that the peer received the announcement. For Satellite metadata,
 `metadataDelivery.backhaulAckRequired` and `satelliteNativeComposite` expose the
 same reliability contract as `send()`. Failed announcement sends can leave an
 uploaded but unannounced file in the Somewear service.
+
+The catalogue/recovery path fixes that missed-announcement case. It still needs
+authenticated IP connectivity because the retained Somewear file service owns
+the bytes. It does not turn a large image into an offline mesh-radio transfer.
+Native Satellite composite children remain private to Somewear Core: the SDK
+cannot ask for one native child such as “part 4”; a terminal Satellite failure
+requires retrying the complete logical message under operator policy.
 
 ### Workspace and mesh-key readiness
 
@@ -781,8 +849,11 @@ USB-specific errors are represented separately:
 File-specific errors are:
 
 - `FILE_READ_FAILED`: SC3's URI permission expired or the source cannot be reopened.
+- `FILE_LIST_FAILED`: the authenticated workspace catalogue could not be read.
 - `FILE_UPLOAD_FAILED`: the upload ticket or signed-URL PUT failed.
 - `FILE_DOWNLOAD_FAILED`: the download ticket, GET, or destination URI failed.
+- `FILE_INTEGRITY_FAILED`: the completed byte count did not match Somewear metadata.
+- `FILE_CACHE_FAILED`: the SDK could not update its app-private catalogue/cache.
 
 ## Low-level gateway IPC contract
 
@@ -842,6 +913,7 @@ Every method returns a `Bundle` with:
 | `prepareFileUpload` | name, MIME, SHA-256, byte count, workspace | internal signed-upload ticket and file metadata |
 | `sendFileMetadata` | prepared file metadata, message ID, workspace, route policy, radio/satellite timeouts | parcel/message/file acceptance fields and `satellite_fallback_armed` |
 | `pollIncomingFiles` | `after_sequence`, `limit` | file-metadata `items: ArrayList<Bundle>` |
+| `listWorkspaceFiles` | `workspace_id`, `offset`, `limit` | bounded file-metadata page, `total_count`, `next_offset` |
 | `getFileDownloadUrl` | `file_id`, `workspace_id` | internal signed-download ticket |
 | `getReceiveHealth` | none | subscription, callback, accepted/ignored/error, transport-fragment/reassembly, queue, last channel/status/direction/parcel, and last-event counters |
 | `joinWorkspace` | `invite_code`, optional `workspace_timeout_ms` | joined workspace fields, `workspace_sync_completed` |
@@ -871,7 +943,7 @@ are not logged, persisted, or exposed to UI code.
 
 ## Gateway compatibility
 
-| Capability | Gateway v15 | Validation/work remaining |
+| Capability | Gateway v16 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -890,6 +962,7 @@ are not logged, persisted, or exposed to UI code.
 | Mesh-network snapshot | Yes | Empty-state Android validation passed; live peer RSSI/topology requires hardware validation |
 | File/image metadata receive | Yes | Native 25 MB and 50 MB image metadata records parsed and polled as Radio on two Android runtimes without transferring bytes through Binder |
 | File/image upload and download | Yes | SDK/gateway build and signed-ticket paths implemented; live authenticated Somewear service upload/download remains account acceptance testing |
+| Workspace file catalogue and selective recovery | Yes | Gateway/AAR artifact contract verified; selective-ID planning, bounded retry, atomic 2 MiB download, truncation rejection, and offline catalogue cache unit tested; live authenticated `GetFiles` acceptance remains |
 | Automatic radio-then-satellite fallback | Yes | Race/timeout/cancel/dedup unit tested; the signed APK queued Radio then Satellite on two Android runtimes and exposed `SATELLITE` delivery status; live over-air terminal delivery still requires provisioned Nodes |
 | QR scanner and invite validation | Yes | Clean SC3 runtime without ML Kit/CameraX launched gateway camera on emulator; parser has unit coverage |
 | Workspace join/sync/list/selection/readiness | Yes | Authenticated empty-cache sync and invalid-invite backend rejection emulator validated; a real issued invite and key transfer require account/hardware acceptance |

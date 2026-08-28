@@ -126,6 +126,7 @@ public final class GatewayV2 {
             if ("prepareFileUpload".equals(method)) return prepareFileUpload(extras);
             if ("sendFileMetadata".equals(method)) return sendFileMetadata(extras);
             if ("pollIncomingFiles".equals(method)) return pollIncomingFiles(extras);
+            if ("listWorkspaceFiles".equals(method)) return listWorkspaceFiles(extras);
             if ("getFileDownloadUrl".equals(method)) return fileDownloadUrl(extras);
             if ("getReceiveHealth".equals(method)) return receiveHealth();
             if ("startReceiving".equals(method)) return startReceivingResult();
@@ -257,6 +258,7 @@ public final class GatewayV2 {
                 "file_upload",
                 "file_metadata_send",
                 "incoming_files",
+                "workspace_file_catalog",
                 "file_download",
                 "receive_health",
                 "hardware_settings",
@@ -1561,6 +1563,138 @@ public final class GatewayV2 {
         }
         Bundle result = ok("Incoming Somewear files");
         result.putParcelableArrayList("items", items);
+        return result;
+    }
+
+    /**
+     * Reads the authenticated Somewear file catalogue for one workspace.
+     *
+     * The retained FileRemoteSource does not expose GetFiles even though its
+     * authenticated client and protobuf method descriptor are present. Keep the
+     * reflective call inside the gateway process and return only a bounded page
+     * of non-secret metadata through Binder.
+     */
+    private static Bundle listWorkspaceFiles(Bundle extras) throws Exception {
+        if (extras == null) return error("INVALID_REQUEST", "Missing extras Bundle");
+        long workspaceId = extras.getLong("workspace_id", 0L);
+        int offset = extras.getInt("offset", 0);
+        int limit = extras.getInt("limit", 100);
+        if (workspaceId <= 0L) return error("INVALID_REQUEST", "workspace_id must be positive");
+        if (offset < 0 || limit < 1 || limit > 500) {
+            return error("INVALID_REQUEST", "offset must be non-negative and limit must be between 1 and 500");
+        }
+
+        ensureCoreStarted();
+        final Object response;
+        try {
+            Class<?> requestClass = Class.forName(
+                    "com.somewear.api.v1.FileServiceProto$GetFileMetadataRequest"
+            );
+            Object requestBuilder = requestClass.getMethod("newBuilder").invoke(null);
+            invoke(requestBuilder, "setWorkspaceId", Long.toString(workspaceId));
+            Object request = invokeNoArgs(requestBuilder, "build");
+
+            Class<?> serviceClass = Class.forName("com.somewear.api.v1.FileServiceGrpc");
+            Object methodDescriptor = serviceClass
+                    .getMethod("getGetFilesMethod")
+                    .invoke(null);
+            Object grpcClient = invokeNoArgs(fileRemoteSource(), "getRequireGrpcClient");
+            Object grpcResult = invokeSuspend(
+                    grpcClient,
+                    "makeCall",
+                    DEFAULT_WORKSPACE_TIMEOUT_MS,
+                    methodDescriptor,
+                    request,
+                    null,
+                    true,
+                    true,
+                    null
+            );
+            response = tryInvokeNoArgs(grpcResult, "getData");
+            if (response == null) {
+                int statusCode = (int) numberOrDefault(
+                        tryInvokeNoArgs(grpcResult, "getStatusCode"),
+                        -1L
+                );
+                if (statusCode == 7 || statusCode == 16) {
+                    return error(
+                            "PERMISSION_DENIED",
+                            "Somewear rejected access to the workspace file catalogue"
+                    );
+                }
+                if (statusCode == 5) {
+                    return error("NOT_FOUND", "Somewear workspace file catalogue was not found");
+                }
+                if (statusCode == 4) {
+                    return error("TIMEOUT", "Somewear workspace file catalogue timed out");
+                }
+                if (statusCode == 14) {
+                    return error(
+                            "NETWORK_UNAVAILABLE",
+                            "Somewear workspace file catalogue is unavailable"
+                    );
+                }
+                return error(
+                        "FILE_LIST_FAILED",
+                        "Somewear could not list the workspace file catalogue"
+                );
+            }
+        } catch (SuspendTimeoutException timeout) {
+            return error("TIMEOUT", "Timed out listing the Somewear workspace files");
+        } catch (Throwable failure) {
+            return error(
+                    "FILE_LIST_FAILED",
+                    "Somewear could not list workspace files (" + rootClassName(failure) + ")"
+            );
+        }
+
+        Object rawFiles = invokeNoArgs(response, "getFilesList");
+        if (!(rawFiles instanceof List)) {
+            return error("MALFORMED_RESPONSE", "Somewear returned an invalid file catalogue");
+        }
+        List<?> files = (List<?>) rawFiles;
+        int totalCount = files.size();
+        int start = Math.min(offset, totalCount);
+        int end = Math.min(totalCount, start + limit);
+        ArrayList<Bundle> items = new ArrayList<>(end - start);
+        for (int index = start; index < end; index++) {
+            Object file = files.get(index);
+            String fileId = stringOrNull(tryInvokeNoArgs(file, "getId"));
+            if (fileId == null) continue;
+            Bundle item = new Bundle();
+            item.putString("file_id", fileId);
+            item.putString("file_name", defaultText(tryInvokeNoArgs(file, "getName"), fileId));
+            putText(item, "mime_type", tryInvokeNoArgs(file, "getMimeType"));
+            item.putLong(
+                    "file_size_bytes",
+                    numberOrDefault(tryInvokeNoArgs(file, "getFileSize"), 0L)
+            );
+            item.putLong("workspace_id", workspaceId);
+            putText(item, "file_user_id", tryInvokeNoArgs(file, "getUserId"));
+            item.putLong(
+                    "file_created_at_ms",
+                    protoTimestampMillis(tryInvokeNoArgs(file, "getCreatedTimestamp"))
+            );
+            item.putLong(
+                    "file_uploaded_at_ms",
+                    protoTimestampMillis(tryInvokeNoArgs(file, "getUploadedTimestamp"))
+            );
+            Object voiceRecording = tryInvokeNoArgs(file, "getIsVoiceRecording");
+            if (voiceRecording instanceof Boolean) {
+                item.putBoolean("file_is_voice_recording", (Boolean) voiceRecording);
+            }
+            Object mediaDuration = tryInvokeNoArgs(file, "getMediaDurationMs");
+            if (mediaDuration instanceof Number) {
+                item.putInt("file_media_duration_ms", ((Number) mediaDuration).intValue());
+            }
+            items.add(item);
+        }
+
+        Bundle result = ok("Somewear workspace file catalogue");
+        result.putParcelableArrayList("items", items);
+        result.putInt("total_count", totalCount);
+        result.putInt("offset", offset);
+        result.putInt("next_offset", end < totalCount ? end : -1);
         return result;
     }
 

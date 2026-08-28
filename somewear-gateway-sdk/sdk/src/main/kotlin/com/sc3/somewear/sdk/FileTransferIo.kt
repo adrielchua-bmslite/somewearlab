@@ -7,7 +7,12 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.UUID
 
 internal data class LocalFileDescription(
     val name: String,
@@ -126,3 +131,69 @@ internal fun downloadToLocalFile(
         connection.disconnect()
     }
 }
+
+/** Downloads to an app-private temporary file and publishes it only after size verification. */
+internal fun downloadToManagedFile(
+    signedDownloadUrl: String,
+    destination: File,
+    expectedSizeBytes: Long,
+): Long {
+    require(expectedSizeBytes >= 0L) { "expectedSizeBytes must be non-negative" }
+    destination.parentFile?.mkdirs()
+    val temporary = File(
+        destination.parentFile,
+        ".${destination.name}.${UUID.randomUUID()}.part",
+    )
+    val connection = (URL(signedDownloadUrl).openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 30_000
+        readTimeout = 120_000
+    }
+    try {
+        val code = connection.responseCode
+        if (code !in 200..299) {
+            throw IllegalStateException("Somewear file download returned HTTP $code")
+        }
+        var count = 0L
+        BufferedInputStream(connection.inputStream).use { input ->
+            BufferedOutputStream(temporary.outputStream()).use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (read == 0) continue
+                    output.write(buffer, 0, read)
+                    count += read
+                }
+            }
+        }
+        if (count != expectedSizeBytes) {
+            throw FileSizeMismatchException(expectedSizeBytes, count)
+        }
+        try {
+            Files.move(
+                temporary.toPath(),
+                destination.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                temporary.toPath(),
+                destination.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        }
+        return count
+    } finally {
+        connection.disconnect()
+        temporary.delete()
+    }
+}
+
+internal class FileSizeMismatchException(
+    val expectedBytes: Long,
+    val actualBytes: Long,
+) : IllegalStateException(
+    "Downloaded file size mismatch: expected $expectedBytes bytes but received $actualBytes",
+)

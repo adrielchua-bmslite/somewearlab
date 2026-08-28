@@ -89,11 +89,40 @@ public interface SomewearClient : AutoCloseable {
 
     public fun incomingFiles(afterSequence: Long = 0L): Flow<IncomingFile>
 
+    /**
+     * Returns one bounded page from the authenticated Somewear workspace file catalogue.
+     * This finds files even when their radio/satellite metadata announcement was missed.
+     */
+    public suspend fun listWorkspaceFiles(
+        workspaceId: Long,
+        offset: Int = 0,
+        limit: Int = 100,
+    ): SomewearResult<WorkspaceFilePage>
+
     /** Downloads [file] into a caller-owned content/file URI. */
     public suspend fun downloadFile(
         file: IncomingFile,
         destinationUri: Uri,
     ): SomewearResult<FileDownloadReceipt>
+
+    /** Downloads a catalogue entry into a caller-owned content/file URI. */
+    public suspend fun downloadWorkspaceFile(
+        file: WorkspaceFile,
+        destinationUri: Uri,
+    ): SomewearResult<FileDownloadReceipt>
+
+    /** Last catalogue snapshot whose completed files remain in the SDK-managed cache. */
+    public suspend fun cachedWorkspaceFiles(
+        workspaceId: Long,
+    ): SomewearResult<List<WorkspaceFile>>
+
+    /**
+     * Lists the full remote catalogue, compares it with the SDK-managed app-private cache,
+     * and downloads missing files with bounded retry and atomic completion.
+     */
+    public fun syncWorkspaceContent(
+        request: WorkspaceContentSyncRequest,
+    ): Flow<WorkspaceContentSyncEvent>
 
     /** Non-secret counters showing whether the gateway is subscribed and seeing router traffic. */
     public suspend fun receiveHealth(): SomewearResult<ReceiveHealth>
