@@ -96,7 +96,11 @@ public final class GatewayV2 {
 
     private static Context appContext;
     private static Object payloadSubscription;
+    private static Object subscribedRouter;
+    private static Object subscribedPayloadFlow;
     private static long nextSequence = 1L;
+    private static long volatileAcknowledgedThroughSequence;
+    private static long volatileDroppedIncomingCount;
     private static long nextFileSequence = 1L;
     private static long routerCallbackCount;
     private static long inboundMessageCount;
@@ -118,24 +122,47 @@ public final class GatewayV2 {
     private static String lastPayloadStatus;
     private static boolean lastPayloadOutbound;
     private static int lastPayloadParcelId;
+    private static long subscriptionAttemptCount;
+    private static long subscriptionReplacementCount;
+    private static long lastSubscriptionAt;
+    private static boolean receiveServiceCreated;
+    private static long receiveServiceBindCount;
+    private static long receiveServiceUnbindCount;
+    private static long receiveServiceLastEventAt;
     private static Object compositePackager;
     private static Object fileRemoteSource;
     private static FragmentRecoveryStore fragmentRecoveryStore;
+    private static IncomingMessageStore incomingMessageStore;
 
     private GatewayV2() {}
 
     public static void initialize(Context context) {
-        appContext = context.getApplicationContext() != null
+        Context resolvedContext = context.getApplicationContext() != null
                 ? context.getApplicationContext()
                 : context;
-        try {
-            fragmentRecoveryStore = new FragmentRecoveryStore(
-                    new File(appContext.getFilesDir(), "sc3-message-recovery")
-            );
-            fragmentRecoveryStore.prune(System.currentTimeMillis());
-        } catch (IOException failure) {
-            fragmentRecoveryStore = null;
-            Log.e(LOG_TAG, "Could not initialize the private fragment recovery journal");
+        synchronized (LOCK) {
+            appContext = resolvedContext;
+            if (fragmentRecoveryStore == null) {
+                try {
+                    fragmentRecoveryStore = new FragmentRecoveryStore(
+                            new File(appContext.getFilesDir(), "sc3-message-recovery")
+                    );
+                    fragmentRecoveryStore.prune(System.currentTimeMillis());
+                } catch (IOException failure) {
+                    fragmentRecoveryStore = null;
+                    Log.e(LOG_TAG, "Could not initialize the private fragment recovery journal");
+                }
+            }
+            if (incomingMessageStore == null) {
+                try {
+                    incomingMessageStore = new IncomingMessageStore(
+                            new File(appContext.getFilesDir(), "sc3-incoming-inbox")
+                    );
+                } catch (IOException failure) {
+                    incomingMessageStore = null;
+                    Log.e(LOG_TAG, "Could not initialize the private incoming-message inbox");
+                }
+            }
         }
     }
 
@@ -147,6 +174,9 @@ public final class GatewayV2 {
             if ("cancelMessage".equals(method)) return cancelMessage(extras);
             if ("getDeliveryStatus".equals(method)) return deliveryStatus(extras);
             if ("pollIncomingMessages".equals(method)) return pollIncoming(extras);
+            if ("acknowledgeIncomingMessages".equals(method)) {
+                return acknowledgeIncoming(extras);
+            }
             if ("listIncompleteMessageTransfers".equals(method)) {
                 return listIncompleteMessageTransfers();
             }
@@ -290,6 +320,8 @@ public final class GatewayV2 {
                 "delivery_status",
                 "message_cancel",
                 "incoming_messages",
+                "persistent_incoming_messages",
+                "incoming_message_ack",
                 "node_telemetry",
                 "satellite_signal",
                 "mesh_network_status",
@@ -300,6 +332,7 @@ public final class GatewayV2 {
                 "workspace_file_catalog",
                 "file_download",
                 "receive_health",
+                "receive_diagnostics_v2",
                 "hardware_settings",
                 "tracking_settings",
                 "network_settings",
@@ -1558,16 +1591,78 @@ public final class GatewayV2 {
         }
 
         ArrayList<Bundle> items = new ArrayList<>();
+        IncomingMessageStore store = incomingMessageStore;
+        if (store != null) {
+            for (IncomingMessageStore.Record record : store.listAfter(after, limit)) {
+                items.add(incomingBundle(record));
+            }
+        }
         synchronized (LOCK) {
             for (Bundle item : INCOMING) {
                 if (item.getLong("sequence") > after) {
                     items.add(new Bundle(item));
-                    if (items.size() >= limit) break;
                 }
             }
         }
+        items.sort((left, right) -> Long.compare(
+                left.getLong("sequence"),
+                right.getLong("sequence")
+        ));
+        while (items.size() > limit) items.remove(items.size() - 1);
         Bundle result = ok("Incoming messages");
         result.putParcelableArrayList("items", items);
+        return result;
+    }
+
+    /**
+     * Deletes only the gateway's local durable copies through the supplied sequence.
+     * This is not a satellite, radio, or server delivery acknowledgement.
+     */
+    private static Bundle acknowledgeIncoming(Bundle extras) throws IOException {
+        if (extras == null || !extras.containsKey("through_sequence")) {
+            return error("INVALID_REQUEST", "through_sequence is required");
+        }
+        long through = extras.getLong("through_sequence", -1L);
+        if (through < 0L) {
+            return error("INVALID_REQUEST", "through_sequence must be non-negative");
+        }
+        IncomingMessageStore store = incomingMessageStore;
+        IncomingMessageStore.Stats before = store == null ? null : store.stats();
+        long volatileLatest;
+        synchronized (LOCK) {
+            volatileLatest = latestVolatileSequence();
+        }
+        long latest = Math.max(before == null ? 0L : before.latestSequence, volatileLatest);
+        if (through > latest) return error("INVALID_REQUEST", "Cannot acknowledge a future sequence");
+
+        final IncomingMessageStore.Stats stats;
+        if (store == null) {
+            stats = null;
+        } else {
+            try {
+                stats = store.acknowledgeThrough(Math.min(through, before.latestSequence));
+            } catch (IllegalArgumentException invalid) {
+                return error("INVALID_REQUEST", invalid.getMessage());
+            }
+        }
+        final int volatileRemaining;
+        synchronized (LOCK) {
+            INCOMING.removeIf(item -> item.getLong("sequence") <= through);
+            volatileAcknowledgedThroughSequence = Math.max(
+                    volatileAcknowledgedThroughSequence,
+                    through
+            );
+            volatileRemaining = INCOMING.size();
+        }
+        Bundle result = ok("Incoming messages acknowledged in the local gateway inbox");
+        result.putLong(
+                "acknowledged_through_sequence",
+                Math.max(
+                        stats == null ? 0L : stats.acknowledgedThroughSequence,
+                        volatileAcknowledgedThroughSequence
+                )
+        );
+        result.putInt("remaining_count", (stats == null ? 0 : stats.queuedCount) + volatileRemaining);
         return result;
     }
 
@@ -2097,8 +2192,23 @@ public final class GatewayV2 {
         int persistedIncomplete = store == null
                 ? 0
                 : store.listIncoming(System.currentTimeMillis()).size();
+        IncomingMessageStore inbox = incomingMessageStore;
+        IncomingMessageStore.Stats inboxStats = inbox == null ? null : inbox.stats();
+        boolean subscriptionMatchesCurrent = subscriptionMatchesCurrentRouter();
+        CoreReceiveState coreReceiveState = inspectCoreReceiveState();
         synchronized (LOCK) {
-            result.putBoolean("receive_subscription_active", payloadSubscription != null);
+            result.putBoolean(
+                    "receive_subscription_active",
+                    payloadSubscription != null && subscriptionMatchesCurrent
+            );
+            result.putBoolean("subscribed_router_matches_current", subscriptionMatchesCurrent);
+            result.putLong("subscription_attempt_count", subscriptionAttemptCount);
+            result.putLong("subscription_replacement_count", subscriptionReplacementCount);
+            result.putLong("last_subscription_at_ms", lastSubscriptionAt);
+            result.putBoolean("receive_service_created", receiveServiceCreated);
+            result.putLong("receive_service_bind_count", receiveServiceBindCount);
+            result.putLong("receive_service_unbind_count", receiveServiceUnbindCount);
+            result.putLong("receive_service_last_event_at_ms", receiveServiceLastEventAt);
             result.putLong("router_callback_count", routerCallbackCount);
             result.putLong("inbound_message_count", inboundMessageCount);
             result.putLong("ignored_inbound_count", ignoredInboundCount);
@@ -2126,8 +2236,44 @@ public final class GatewayV2 {
                 result.putBoolean("last_payload_outbound", lastPayloadOutbound);
                 result.putInt("last_payload_parcel_id", lastPayloadParcelId);
             }
-            result.putInt("queued_incoming_count", INCOMING.size());
-            result.putLong("latest_sequence", nextSequence - 1L);
+            result.putBoolean("persistent_inbox_enabled", inboxStats != null);
+            int persistentQueued = inboxStats == null ? 0 : inboxStats.queuedCount;
+            long persistentOldest = inboxStats == null ? 0L : inboxStats.oldestSequence;
+            long volatileOldest = oldestVolatileSequence();
+            long combinedOldest = persistentOldest == 0L
+                    ? volatileOldest
+                    : volatileOldest == 0L
+                    ? persistentOldest
+                    : Math.min(persistentOldest, volatileOldest);
+            result.putInt(
+                    "queued_incoming_count",
+                    persistentQueued + INCOMING.size()
+            );
+            result.putLong("oldest_sequence", combinedOldest);
+            result.putLong(
+                    "latest_sequence",
+                    Math.max(
+                            inboxStats == null ? 0L : inboxStats.latestSequence,
+                            latestVolatileSequence()
+                    )
+            );
+            result.putLong(
+                    "acknowledged_through_sequence",
+                    Math.max(
+                            inboxStats == null ? 0L : inboxStats.acknowledgedThroughSequence,
+                            volatileAcknowledgedThroughSequence
+                    )
+            );
+            result.putLong(
+                    "dropped_incoming_count",
+                    (inboxStats == null ? 0L : inboxStats.droppedCount)
+                            + volatileDroppedIncomingCount
+            );
+        }
+        result.putBoolean("core_configured", coreReceiveState.configured);
+        result.putBoolean("package_stream_state_known", coreReceiveState.streamStateKnown);
+        if (coreReceiveState.streamStateKnown) {
+            result.putBoolean("package_stream_started", coreReceiveState.streamStarted);
         }
         return result;
     }
@@ -2864,6 +3010,82 @@ public final class GatewayV2 {
         }
     }
 
+    private static long oldestVolatileSequence() {
+        return INCOMING.isEmpty() ? 0L : INCOMING.get(0).getLong("sequence");
+    }
+
+    private static long latestVolatileSequence() {
+        return INCOMING.isEmpty()
+                ? volatileAcknowledgedThroughSequence
+                : INCOMING.get(INCOMING.size() - 1).getLong("sequence");
+    }
+
+    private static boolean subscriptionMatchesCurrentRouter() {
+        final Object subscription;
+        final Object expectedRouter;
+        final Object expectedFlow;
+        synchronized (LOCK) {
+            subscription = payloadSubscription;
+            expectedRouter = subscribedRouter;
+            expectedFlow = subscribedPayloadFlow;
+        }
+        if (subscription == null || expectedRouter == null || expectedFlow == null) return false;
+        try {
+            Object currentRouter = router();
+            Object currentFlow = invokeNoArgs(currentRouter, "getPayload");
+            return currentRouter == expectedRouter && currentFlow == expectedFlow;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Best-effort read-only diagnostics; absence never interrupts receive or send. */
+    private static CoreReceiveState inspectCoreReceiveState() {
+        try {
+            Class<?> configClass = Class.forName(
+                    "com.somewearlabs.somewearcore.api.SomewearCoreConfig"
+            );
+            Object sharedConfig = declaredFieldValue(configClass, null, "sharedConfig");
+            if (sharedConfig == null) return new CoreReceiveState(false, false, false);
+            Object service = tryInvokeNoArgs(sharedConfig, "getService");
+            Object streamClient = tryInvokeNoArgs(service, "getPackageStreamClient");
+            if (streamClient == null) {
+                streamClient = declaredFieldValue(service == null ? null : service.getClass(), service,
+                        "packageStreamClient");
+            }
+            Object didStartStream = declaredFieldValue(
+                    streamClient == null ? null : streamClient.getClass(),
+                    streamClient,
+                    "didStartStream"
+            );
+            Object value = tryInvokeNoArgs(didStartStream, "getValue");
+            if (value instanceof Boolean) {
+                return new CoreReceiveState(true, true, (Boolean) value);
+            }
+            return new CoreReceiveState(true, false, false);
+        } catch (Throwable ignored) {
+            return new CoreReceiveState(false, false, false);
+        }
+    }
+
+    private static Object declaredFieldValue(Class<?> type, Object target, String name) {
+        if (type == null) return null;
+        try {
+            for (Class<?> cursor = type; cursor != null; cursor = cursor.getSuperclass()) {
+                try {
+                    Field field = cursor.getDeclaredField(name);
+                    field.setAccessible(true);
+                    return field.get(target);
+                } catch (NoSuchFieldException ignored) {
+                    // Continue through the hierarchy.
+                }
+            }
+        } catch (Throwable ignored) {
+            return null;
+        }
+        return null;
+    }
+
     private static void putNumber(Bundle result, String key, Object value) {
         if (value instanceof Number) result.putInt(key, ((Number) value).intValue());
     }
@@ -2904,6 +3126,8 @@ public final class GatewayV2 {
         synchronized (LOCK) {
             subscription = payloadSubscription;
             payloadSubscription = null;
+            subscribedRouter = null;
+            subscribedPayloadFlow = null;
             DELIVERY_TRACKER.clear();
             ROUTE_FALLBACKS.clear();
             RADIO_REASSEMBLER.clear();
@@ -2938,6 +3162,34 @@ public final class GatewayV2 {
         startReceivingResult();
     }
 
+    static void onReceiveServiceCreated() {
+        synchronized (LOCK) {
+            receiveServiceCreated = true;
+            receiveServiceLastEventAt = System.currentTimeMillis();
+        }
+    }
+
+    static void onReceiveServiceBound() {
+        synchronized (LOCK) {
+            receiveServiceBindCount++;
+            receiveServiceLastEventAt = System.currentTimeMillis();
+        }
+    }
+
+    static void onReceiveServiceUnbound() {
+        synchronized (LOCK) {
+            receiveServiceUnbindCount++;
+            receiveServiceLastEventAt = System.currentTimeMillis();
+        }
+    }
+
+    static void onReceiveServiceDestroyed() {
+        synchronized (LOCK) {
+            receiveServiceCreated = false;
+            receiveServiceLastEventAt = System.currentTimeMillis();
+        }
+    }
+
     private static Bundle startReceivingResult() {
         try {
             ensureCoreStarted();
@@ -2962,9 +3214,26 @@ public final class GatewayV2 {
 
     private static void ensurePayloadSubscription() throws Exception {
         synchronized (LOCK) {
-            if (payloadSubscription != null) return;
-            final Object router = router();
-            final Object flow = invokeNoArgs(router, "getPayload");
+            final Object activeRouter = router();
+            final Object activeFlow = invokeNoArgs(activeRouter, "getPayload");
+            if (payloadSubscription != null
+                    && subscribedRouter == activeRouter
+                    && subscribedPayloadFlow == activeFlow) {
+                return;
+            }
+            subscriptionAttemptCount++;
+            Object previousSubscription = payloadSubscription;
+            if (previousSubscription != null) {
+                try {
+                    invokeNoArgs(previousSubscription, "dispose");
+                } catch (Throwable ignored) {
+                    // Replacing a stale subscription remains the safe recovery path.
+                }
+                subscriptionReplacementCount++;
+            }
+            payloadSubscription = null;
+            subscribedRouter = null;
+            subscribedPayloadFlow = null;
             final Class<?> function1 = Class.forName("kotlin.jvm.functions.Function1");
             InvocationHandler handler = (proxy, method, args) -> {
                 if ("invoke".equals(method.getName()) && args != null && args.length == 1) {
@@ -2979,8 +3248,11 @@ public final class GatewayV2 {
                     new Class<?>[] { function1 },
                     handler
             );
-            Method onEach = flow.getClass().getMethod("onEach", function1);
-            payloadSubscription = onEach.invoke(flow, callback);
+            Method onEach = activeFlow.getClass().getMethod("onEach", function1);
+            payloadSubscription = onEach.invoke(activeFlow, callback);
+            subscribedRouter = activeRouter;
+            subscribedPayloadFlow = activeFlow;
+            lastSubscriptionAt = System.currentTimeMillis();
         }
     }
 
@@ -3429,8 +3701,26 @@ public final class GatewayV2 {
             String channel,
             long receivedAt
     ) {
+        IncomingMessageStore store = incomingMessageStore;
+        if (store != null) {
+            try {
+                store.append(messageId, content, workspaceId, senderId, channel, receivedAt);
+                synchronized (LOCK) {
+                    inboundMessageCount++;
+                    lastInboundMessageAt = receivedAt;
+                }
+                return;
+            } catch (Throwable failure) {
+                // Preserve the established in-memory receive path if private
+                // storage is temporarily unavailable.
+                recordReceiveError("INBOX_PERSIST", failure);
+            }
+        }
         synchronized (LOCK) {
             Bundle item = new Bundle();
+            long now = System.currentTimeMillis();
+            long sequenceFloor = now <= Long.MAX_VALUE / 1_000L ? now * 1_000L : now;
+            nextSequence = Math.max(nextSequence, sequenceFloor);
             item.putLong("sequence", nextSequence++);
             item.putString("message_id", messageId);
             item.putString("message", content);
@@ -3441,8 +3731,27 @@ public final class GatewayV2 {
             INCOMING.add(item);
             inboundMessageCount++;
             lastInboundMessageAt = receivedAt;
-            while (INCOMING.size() > MAX_INCOMING_MESSAGES) INCOMING.remove(0);
+            while (INCOMING.size() > MAX_INCOMING_MESSAGES) {
+                Bundle removed = INCOMING.remove(0);
+                volatileAcknowledgedThroughSequence = Math.max(
+                        volatileAcknowledgedThroughSequence,
+                        removed.getLong("sequence")
+                );
+                volatileDroppedIncomingCount++;
+            }
         }
+    }
+
+    private static Bundle incomingBundle(IncomingMessageStore.Record record) {
+        Bundle item = new Bundle();
+        item.putLong("sequence", record.sequence);
+        item.putString("message_id", record.messageId);
+        item.putString("message", record.content);
+        item.putLong("workspace_id", record.workspaceId);
+        item.putString("sender_id", record.senderId);
+        item.putLong("received_at_ms", record.receivedAt);
+        item.putString("delivered_channel", record.channel);
+        return item;
     }
 
     private static String dedupKey(
@@ -3808,6 +4117,18 @@ public final class GatewayV2 {
         while (cursor.getCause() != null && cursor.getCause() != cursor) cursor = cursor.getCause();
         String message = cursor.getMessage();
         return cursor.getClass().getName() + (message == null ? "" : ": " + message);
+    }
+
+    private static final class CoreReceiveState {
+        final boolean configured;
+        final boolean streamStateKnown;
+        final boolean streamStarted;
+
+        CoreReceiveState(boolean configured, boolean streamStateKnown, boolean streamStarted) {
+            this.configured = configured;
+            this.streamStateKnown = streamStateKnown;
+            this.streamStarted = streamStarted;
+        }
     }
 
     private static final class SuspendTimeoutException extends Exception {}

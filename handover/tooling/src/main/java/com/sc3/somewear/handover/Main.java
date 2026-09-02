@@ -168,6 +168,10 @@ public final class Main {
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/FragmentRecoveryStore.java"
         );
+        Path incomingMessageStore = repoRoot.resolve(
+                "somewear-gateway-sdk/gateway-helper/src/main/java/"
+                        + "com/somewearlabs/gateway/IncomingMessageStore.java"
+        );
         Path scanner = repoRoot.resolve(
                 "somewear-gateway-sdk/gateway-helper/src/main/java/"
                         + "com/somewearlabs/gateway/WorkspaceQrScannerActivity.java"
@@ -195,6 +199,7 @@ public final class Main {
         requireFile(transportPolicy, "gateway transport policy");
         requireFile(recoveryProtocol, "Radio fragment recovery protocol");
         requireFile(recoveryStore, "Radio fragment recovery journal");
+        requireFile(incomingMessageStore, "durable incoming-message inbox");
         requireFile(fallbackCoordinator, "radio-to-satellite fallback coordinator");
         requireFile(fallbackEnvelope, "fallback message envelope");
         requireFile(inboundDeduplicator, "cross-channel inbound deduplicator");
@@ -306,6 +311,17 @@ public final class Main {
                 || !sdkClientSource.contains(" retryFragmentedMessage(")) {
             throw new IllegalStateException(
                     "Gateway/SDK must expose durable receiver-confirmed Radio recovery"
+            );
+        }
+        if (!helperSource.contains("persistent_incoming_messages")
+                || !helperSource.contains("incoming_message_ack")
+                || !helperSource.contains("acknowledgeIncomingMessages")
+                || !helperSource.contains("subscribed_router_matches_current")
+                || !sdkClientSource.contains(" acknowledgeIncomingMessagesThrough(")
+                || !sdkClientSource.contains(" ensureReceiving(")) {
+            throw new IllegalStateException(
+                    "Gateway/SDK must expose durable incoming replay, local acknowledgement,"
+                            + " and receive subscription recovery"
             );
         }
         if (!scannerSource.contains("com.budiyev.android.codescanner.CodeScannerView")
@@ -452,6 +468,7 @@ public final class Main {
                 "com/sc3/somewear/sdk/IncompleteMessageTransfer.class",
                 "com/sc3/somewear/sdk/FragmentRecoveryReceipt.class",
                 "com/sc3/somewear/sdk/FragmentRetryReceipt.class",
+                "com/sc3/somewear/sdk/IncomingAcknowledgement.class",
                 "com/sc3/somewear/sdk/SendRequest.class",
                 "com/sc3/somewear/sdk/FileSendRequest.class",
                 "com/sc3/somewear/sdk/SendReceipt.class"
@@ -477,7 +494,10 @@ public final class Main {
                 || !sendReceiptSymbols.contains("satelliteNativeComposite")
                 || !sendReceiptSymbols.contains("backhaulAckRequired")
                 || !receiveHealthSymbols.contains("inboundTransportFragmentCount")
-                || !receiveHealthSymbols.contains("lastDeliveredChannel")) {
+                || !receiveHealthSymbols.contains("lastDeliveredChannel")
+                || !receiveHealthSymbols.contains("persistentInboxEnabled")
+                || !receiveHealthSymbols.contains("subscribedRouterMatchesCurrent")
+                || !receiveHealthSymbols.contains("sdkReceiveServiceConnected")) {
             throw new IllegalStateException(
                     "SDK AAR is missing the Satellite transport/read-back contract"
             );
@@ -508,6 +528,8 @@ public final class Main {
                 "listIncompleteMessageTransfers",
                 "requestMissingMessageFragments",
                 "retryFragmentedMessage",
+                "ensureReceiving",
+                "acknowledgeIncomingMessagesThrough",
                 "factoryReset"
         );
         for (String method : requiredMethods) {
@@ -537,6 +559,7 @@ public final class Main {
         boolean transmissionEstimate = false;
         boolean workspaceFileCatalog = false;
         boolean fragmentRecovery = false;
+        boolean durableIncoming = false;
         boolean providerClass = false;
         boolean gatewayV2Class = false;
         try (ZipFile archive = new ZipFile(apk.toFile())) {
@@ -574,6 +597,13 @@ public final class Main {
                         && definedClasses.contains(
                                 "Lcom/somewearlabs/gateway/FragmentRecoveryStore;"
                         );
+                durableIncoming |= dex.contains("persistent_incoming_messages")
+                        && dex.contains("incoming_message_ack")
+                        && dex.contains("acknowledgeIncomingMessages")
+                        && dex.contains("subscribed_router_matches_current")
+                        && definedClasses.contains(
+                                "Lcom/somewearlabs/gateway/IncomingMessageStore;"
+                        );
             }
         }
         if (!providerClass
@@ -588,13 +618,15 @@ public final class Main {
                 || !legacySatelliteReassembly
                 || !transmissionEstimate
                 || !workspaceFileCatalog
-                || !fragmentRecovery) {
+                || !fragmentRecovery
+                || !durableIncoming) {
             throw new IllegalStateException(
                     "base APK is missing its provider/helper class definition, controlled fallback,"
-                            + " native Satellite composite, or workspace file catalogue contract"
+                            + " native Satellite composite, workspace file catalogue, or durable"
+                            + " incoming-message contract"
             );
         }
-        System.out.println("gateway_radio_satellite_content_contract=OK");
+        System.out.println("gateway_radio_satellite_content_receive_contract=OK");
     }
 
     /** Returns the class descriptors that are defined, rather than merely referenced, by a DEX. */

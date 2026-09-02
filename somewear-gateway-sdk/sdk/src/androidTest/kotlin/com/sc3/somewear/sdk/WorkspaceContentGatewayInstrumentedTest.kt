@@ -85,6 +85,51 @@ class WorkspaceContentGatewayInstrumentedTest {
     }
 
     @Test
+    fun completedIncomingMessageRemainsUntilExplicitlyAcknowledged() {
+        runBlocking {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val client = SomewearGateway.create(context)
+            val messageId = "durable-inbox-${System.currentTimeMillis()}"
+            try {
+                val initialized = client.initialize()
+                assertNoBootstrapCrash(initialized)
+                val injected = context.contentResolver.call(
+                    SomewearGatewayContract.DEFAULT_URI,
+                    "testInjectIncomingMessage",
+                    null,
+                    Bundle().apply {
+                        putString(SomewearGatewayContract.Key.MESSAGE_ID, messageId)
+                        putString(SomewearGatewayContract.Key.CONTENT, "{\"type\":\"RFT\"}")
+                        putLong(SomewearGatewayContract.Key.WORKSPACE_ID, 42L)
+                        putString(SomewearGatewayContract.Key.DELIVERED_CHANNEL, "SATELLITE")
+                    },
+                ) ?: error("Gateway returned no injection result")
+                assertTrue(injected.getBoolean(SomewearGatewayContract.Key.OK))
+
+                val firstPoll = client.pollIncomingMessages(0L, 500)
+                assertTrue(firstPoll is SomewearResult.Success)
+                firstPoll as SomewearResult.Success
+                val received = firstPoll.value.single { it.messageId == messageId }
+
+                val replayBeforeAck = client.pollIncomingMessages(0L, 500)
+                assertTrue(replayBeforeAck is SomewearResult.Success)
+                replayBeforeAck as SomewearResult.Success
+                assertEquals(1, replayBeforeAck.value.count { it.messageId == messageId })
+
+                val ack = client.acknowledgeIncomingMessagesThrough(received.sequence)
+                assertTrue("Incoming acknowledgement failed: $ack", ack is SomewearResult.Success)
+
+                val afterAck = client.pollIncomingMessages(0L, 500)
+                assertTrue(afterAck is SomewearResult.Success)
+                afterAck as SomewearResult.Success
+                assertTrue(afterAck.value.none { it.messageId == messageId })
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
     fun missingRadioFragmentIsRetainedAndCompletedLater() {
         runBlocking {
             val context = InstrumentationRegistry.getInstrumentation().targetContext

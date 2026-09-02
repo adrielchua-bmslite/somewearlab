@@ -6,7 +6,9 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -32,6 +34,7 @@ internal class ContentProviderSomewearClient(
     private val bindingLock = Any()
     @Volatile private var bindingRequested = false
     @Volatile private var serviceConnected = false
+    @Volatile private var closed = false
     private val receiveServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             serviceConnected = true
@@ -43,10 +46,17 @@ internal class ContentProviderSomewearClient(
 
         override fun onBindingDied(name: ComponentName?) {
             serviceConnected = false
+            scheduleReceiveServiceRebind()
         }
 
         override fun onNullBinding(name: ComponentName?) {
             serviceConnected = false
+            synchronized(bindingLock) {
+                if (bindingRequested) {
+                    runCatching { appContext.unbindService(this) }
+                    bindingRequested = false
+                }
+            }
         }
     }
 
@@ -65,6 +75,18 @@ internal class ContentProviderSomewearClient(
     override suspend fun initialize(): SomewearResult<Unit> {
         val activated = call(SomewearGatewayContract.Method.INITIALIZE).unit()
         if (activated is SomewearResult.Failure) return activated
+        val bound = bindReceiveService()
+        if (bound is SomewearResult.Failure) return bound
+        return call(SomewearGatewayContract.Method.START_RECEIVING).unit()
+    }
+
+    override suspend fun ensureReceiving(): SomewearResult<Unit> {
+        if (closed) {
+            return invalid(
+                SomewearGatewayContract.Method.START_RECEIVING,
+                "This SomewearClient has already been closed",
+            )
+        }
         val bound = bindReceiveService()
         if (bound is SomewearResult.Failure) return bound
         return call(SomewearGatewayContract.Method.START_RECEIVING).unit()
@@ -381,6 +403,30 @@ internal class ContentProviderSomewearClient(
             },
         ).map { bundle ->
             bundle.bundleList(SomewearGatewayContract.Key.ITEMS).map(::parseIncomingMessage)
+        }
+    }
+
+    override suspend fun acknowledgeIncomingMessagesThrough(
+        sequence: Long,
+    ): SomewearResult<IncomingAcknowledgement> {
+        if (sequence < 0L) {
+            return invalid(
+                SomewearGatewayContract.Method.ACKNOWLEDGE_INCOMING_MESSAGES,
+                "sequence must be non-negative",
+            )
+        }
+        return call(
+            SomewearGatewayContract.Method.ACKNOWLEDGE_INCOMING_MESSAGES,
+            Bundle().apply {
+                putLong(SomewearGatewayContract.Key.THROUGH_SEQUENCE, sequence)
+            },
+        ).map { bundle ->
+            IncomingAcknowledgement(
+                acknowledgedThroughSequence = bundle.getLong(
+                    SomewearGatewayContract.Key.ACKNOWLEDGED_THROUGH_SEQUENCE,
+                ),
+                remainingCount = bundle.getInt(SomewearGatewayContract.Key.REMAINING_COUNT),
+            )
         }
     }
 
@@ -1209,6 +1255,53 @@ internal class ContentProviderSomewearClient(
                 fragmentRecoveryErrorCount = bundle.getLong(
                     SomewearGatewayContract.Key.FRAGMENT_RECOVERY_ERROR_COUNT,
                 ),
+                persistentInboxEnabled = bundle.getBoolean(
+                    SomewearGatewayContract.Key.PERSISTENT_INBOX_ENABLED,
+                ),
+                oldestSequence = bundle.positiveLongOrNull(
+                    SomewearGatewayContract.Key.OLDEST_SEQUENCE,
+                ),
+                acknowledgedThroughSequence = bundle.getLong(
+                    SomewearGatewayContract.Key.ACKNOWLEDGED_THROUGH_SEQUENCE,
+                ),
+                droppedIncomingCount = bundle.getLong(
+                    SomewearGatewayContract.Key.DROPPED_INCOMING_COUNT,
+                ),
+                subscribedRouterMatchesCurrent = bundle.getBoolean(
+                    SomewearGatewayContract.Key.SUBSCRIBED_ROUTER_MATCHES_CURRENT,
+                ),
+                subscriptionAttemptCount = bundle.getLong(
+                    SomewearGatewayContract.Key.SUBSCRIPTION_ATTEMPT_COUNT,
+                ),
+                subscriptionReplacementCount = bundle.getLong(
+                    SomewearGatewayContract.Key.SUBSCRIPTION_REPLACEMENT_COUNT,
+                ),
+                lastSubscriptionAtEpochMillis = bundle.positiveLongOrNull(
+                    SomewearGatewayContract.Key.LAST_SUBSCRIPTION_AT_MS,
+                ),
+                gatewayReceiveServiceCreated = bundle.getBoolean(
+                    SomewearGatewayContract.Key.RECEIVE_SERVICE_CREATED,
+                ),
+                sdkReceiveServiceConnected = serviceConnected,
+                receiveServiceBindCount = bundle.getLong(
+                    SomewearGatewayContract.Key.RECEIVE_SERVICE_BIND_COUNT,
+                ),
+                receiveServiceUnbindCount = bundle.getLong(
+                    SomewearGatewayContract.Key.RECEIVE_SERVICE_UNBIND_COUNT,
+                ),
+                receiveServiceLastEventAtEpochMillis = bundle.positiveLongOrNull(
+                    SomewearGatewayContract.Key.RECEIVE_SERVICE_LAST_EVENT_AT_MS,
+                ),
+                coreConfigured = bundle.getBoolean(
+                    SomewearGatewayContract.Key.CORE_CONFIGURED,
+                ),
+                packageStreamStarted = if (
+                    bundle.getBoolean(SomewearGatewayContract.Key.PACKAGE_STREAM_STATE_KNOWN)
+                ) {
+                    bundle.getBoolean(SomewearGatewayContract.Key.PACKAGE_STREAM_STARTED)
+                } else {
+                    null
+                },
             )
         }
 
@@ -1336,6 +1429,7 @@ internal class ContentProviderSomewearClient(
     }
 
     override fun close() {
+        closed = true
         synchronized(bindingLock) {
             if (!bindingRequested) return
             runCatching { appContext.unbindService(receiveServiceConnection) }
@@ -1344,7 +1438,26 @@ internal class ContentProviderSomewearClient(
         }
     }
 
+    private fun scheduleReceiveServiceRebind() {
+        Handler(Looper.getMainLooper()).post {
+            synchronized(bindingLock) {
+                if (closed) return@post
+                if (bindingRequested) {
+                    runCatching { appContext.unbindService(receiveServiceConnection) }
+                    bindingRequested = false
+                }
+            }
+            bindReceiveService()
+        }
+    }
+
     private fun bindReceiveService(): SomewearResult<Unit> = synchronized(bindingLock) {
+        if (closed) {
+            return@synchronized invalid(
+                SomewearGatewayContract.Method.START_RECEIVING,
+                "This SomewearClient has already been closed",
+            )
+        }
         if (bindingRequested) return@synchronized SomewearResult.Success(Unit)
         val intent = Intent().setComponent(
             ComponentName(

@@ -339,6 +339,12 @@ public data class IncomingMessage(
     val channel: DeviceChannel,
 )
 
+/** Result of deleting locally persisted gateway inbox records after SC3 stored them. */
+public data class IncomingAcknowledgement(
+    val acknowledgedThroughSequence: Long,
+    val remainingCount: Int,
+)
+
 /** A local URI selected by SC3 and the route used for its small metadata announcement. */
 public data class FileSendRequest(
     val workspaceId: Long,
@@ -624,6 +630,21 @@ public data class ReceiveHealth(
     val retransmittedFragmentCount: Long = 0L,
     val receiverCompletionAckCount: Long = 0L,
     val fragmentRecoveryErrorCount: Long = 0L,
+    val persistentInboxEnabled: Boolean = false,
+    val oldestSequence: Long? = null,
+    val acknowledgedThroughSequence: Long = 0L,
+    val droppedIncomingCount: Long = 0L,
+    val subscribedRouterMatchesCurrent: Boolean = false,
+    val subscriptionAttemptCount: Long = 0L,
+    val subscriptionReplacementCount: Long = 0L,
+    val lastSubscriptionAtEpochMillis: Long? = null,
+    val gatewayReceiveServiceCreated: Boolean = false,
+    val sdkReceiveServiceConnected: Boolean = false,
+    val receiveServiceBindCount: Long = 0L,
+    val receiveServiceUnbindCount: Long = 0L,
+    val receiveServiceLastEventAtEpochMillis: Long? = null,
+    val coreConfigured: Boolean = false,
+    val packageStreamStarted: Boolean? = null,
 )
 
 public data class WorkspaceInfo(

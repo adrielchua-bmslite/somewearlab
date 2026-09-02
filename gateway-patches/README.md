@@ -1,6 +1,6 @@
 # Standalone gateway provider patch
 
-`SomewearGatewayProvider.smali` is the injected provider used by gateway v17. It:
+`SomewearGatewayProvider.smali` is the injected provider used by gateway v18. It:
 
 - initializes Realm from `ContentProvider.onCreate()`;
 - initializes Realm and completes standalone `PluginConfig.setup(context)` before exposing the API-v2 helper;

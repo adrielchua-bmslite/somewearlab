@@ -20,7 +20,7 @@ SC3
 
 SDK version: `0.1.0`
 
-The SDK exposes the complete SC3-facing contract. Gateway v17 implements standalone initialization, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, revisioned variable-size file-batch manifests, authenticated workspace file catalogues, SDK-owned missing-file recovery, durable selective Radio-fragment recovery and peer completion acknowledgement, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, SC3 Radio fragmentation, native Somewear Satellite composite transport, legacy v14 Satellite-frame receive compatibility, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
+The SDK exposes the complete SC3-facing contract. Gateway v18 implements standalone initialization, a durable completed-message inbox with explicit local acknowledgement, automatic router/service resubscription, a state-change-only connection observer, Node hardware settings and telemetry, satellite signal, mesh-network status, message cancellation, power commands, cloud-backed file/image transfer, revisioned variable-size file-batch manifests, authenticated workspace file catalogues, SDK-owned missing-file recovery, durable selective Radio-fragment recovery and peer completion acknowledgement, a bound receive-lifetime service, receive health, gateway-hosted QR invite scanning, fresh-install workspace enrollment/synchronization, Bluetooth connection, USB connection initiation, explicit radio-only and satellite-only sending, controlled radio-then-satellite fallback, SC3 Radio fragmentation, native Somewear Satellite composite transport, legacy v14 Satellite-frame receive compatibility, cross-channel duplicate suppression, inbound router bridging, aggregate delivery-status polling, workspace listing/selection, and non-secret workspace/mesh-key readiness.
 
 The SDK expects the separately installed gateway implementing the API-v2 contract documented below. The private handover repository includes the controlled-test gateway split set under `build/signed-splits-v2/`; see `handover/README.md` for re-signing and installation. No signing private key is committed.
 
@@ -41,6 +41,10 @@ cancellation result, and remaining over-air acceptance boundary.
 See [`RELIABLE_TRANSFER_TEST_REPORT.md`](RELIABLE_TRANSFER_TEST_REPORT.md) for
 the v17 durable fragment recovery, peer acknowledgement, variable file-batch,
 hash verification, and two-emulator restart-style evidence.
+
+See [`RECEIVE_RELIABILITY_TEST_REPORT.md`](RECEIVE_RELIABILITY_TEST_REPORT.md)
+for the v18 durable inbox, restart/replay/acknowledgement Android evidence, large
+payload persistence tests, and the remaining live Somewear downlink boundary.
 
 ## Requirements
 
@@ -571,12 +575,29 @@ Or collect continuously:
 ```kotlin
 lifecycleScope.launch {
     somewear.incomingMessages(afterSequence = lastStoredSequence).collect { message ->
-        persistBeforeAcknowledgingToTheUi(message)
+        // One SC3 database transaction: insert/deduplicate the payload and save
+        // message.sequence as the new contiguous cursor.
+        sc3Database.persistIncomingAndCursor(message)
+
+        // Only after that transaction commits, release the gateway's local copy.
+        somewear.acknowledgeIncomingMessagesThrough(message.sequence)
     }
 }
 ```
 
-Persist the highest received sequence in SC3. Message UUIDs should also be deduplicated because a radio retry may redeliver application content.
+Completed messages are now stored in the gateway's app-private durable inbox,
+not only RAM. The monotonic sequence survives gateway process restarts and an
+unacknowledged message is returned again. Acknowledgement is cumulative: never
+acknowledge a later sequence until SC3 has durably stored every earlier message.
+It deletes only the gateway's local copy; it is not a radio, Satellite, or
+Somewear-server delivery receipt. Message UUIDs should also be deduplicated
+because a transport retry can redeliver application content.
+
+The inbox retains at most 2,000 unacknowledged messages. Monitor
+`droppedIncomingCount`; any non-zero increase means the consumer fell behind and
+the oldest local records had to be discarded. `persistentInboxEnabled=false`
+means private storage initialization failed and the gateway has fallen back to
+the pre-existing RAM queue.
 
 Use `receiveHealth()` when Satellite appears silent. A healthy v15 native
 Satellite receive reaches the gateway as one parent `MessagePayload` with
@@ -597,6 +618,15 @@ when (val health = somewear.receiveHealth()) {
 ```
 
 - `subscriptionActive=false`: the matching gateway service is not bound/started.
+- `sdkReceiveServiceConnected=false`: SC3's service anchor is not currently
+  connected. Android package replacement is rebound automatically; call
+  `ensureReceiving()` to revalidate it explicitly after an unusual lifecycle event.
+- `subscribedRouterMatchesCurrent=false`: the retained core replaced its router;
+  the next poll or `ensureReceiving()` replaces the stale subscription.
+- `coreConfigured=false`: Somewear Core has not completed setup.
+- `packageStreamStarted=false`: the retained Core reports that its cloud package
+  stream is stopped. `null` means this private diagnostic is unavailable in that
+  vendor build; it does not itself prove a receive failure.
 - `routerCallbackCount=0` after a peer transmission: the retained core saw no
   traffic; check both Nodes, active workspace, mesh key, radio channel, and range.
 - `ignoredInboundCount>0`: traffic arrived but was not a Somewear `MessagePayload`
@@ -604,6 +634,12 @@ when (val health = somewear.receiveHealth()) {
 - `errorCount>0`: inspect `lastError`, which contains only a stage and exception
   class, never payload data.
 - `queuedIncomingCount>0` while SC3 shows nothing: fix SC3's Flow/cursor/UI path.
+- `oldestSequence`, `latestSequence`, and `acknowledgedThroughSequence` show the
+  exact local-inbox window; `droppedIncomingCount` must remain zero.
+
+This hardening protects messages after Somewear Core invokes the gateway
+callback. If `routerCallbackCount` does not increase, no wrapper can reconstruct
+that missing downlink; capture the health snapshot and vendor Node/Core logs.
 
 ### Files and images
 
@@ -1018,6 +1054,7 @@ Every method returns a `Bundle` with:
 | `cancelMessage` | `message_id` | canceled fragment count |
 | `getDeliveryStatus` | `message_id` | delivery/channel/error/time plus `receiver_confirmed` and optional confirmation time |
 | `pollIncomingMessages` | `after_sequence`, `limit` | `items: ArrayList<Bundle>` |
+| `acknowledgeIncomingMessages` | `through_sequence` | `acknowledged_through_sequence`, `remaining_count` |
 | `listIncompleteMessageTransfers` | none | incomplete Radio transfers with counts, exact missing indexes, and request state |
 | `requestMissingMessageFragments` | `transfer_id` | requested fragment count and recovery round |
 | `retryFragmentedMessage` | `message_id` | retained transfer ID and requeued fragment count |
@@ -1054,7 +1091,7 @@ are not logged, persisted, or exposed to UI code.
 
 ## Gateway compatibility
 
-| Capability | Gateway v17 | Validation/work remaining |
+| Capability | Gateway v18 | Validation/work remaining |
 |---|---:|---:|
 | Information and activation | Yes | Emulator validated |
 | Bluetooth connect/status/cancel/disconnect | Yes | Physical Node validation |
@@ -1067,6 +1104,7 @@ are not logged, persisted, or exposed to UI code.
 | Oversized JSON over Radio without Satellite | Yes | Durable journal/protocol unit tested; two v17 Android runtimes each omitted one fragment, cleared volatile assembly state, restored/reassembled the exact JSON from the journal, delivered it once, and removed the incomplete record; physical peer-radio acceptance remains |
 | Oversized JSON over Satellite | Yes | On two clean Android emulator installations, exact 504-byte RFT and 2,171-byte CAS JSON each queued one acknowledged native parent with estimates of 2/8 transmissions; clear-sky website and peer-phone acceptance remains |
 | Inbound `SomewearRouter.getPayload()` bridge | Yes | Retained `MessagePayload`→`RouterPayload` parser→SDK Flow validated on Android; physical peer validation remains |
+| Durable completed-message replay and local acknowledgement | Yes | 2.3 KB CAS JSON replayed after forced gateway-process restart with the same sequence and was removed only after acknowledgement; 100 KB persistence and concurrent provider/service startup race unit tested |
 | Delivery status and actual channel | Yes | Multi-fragment aggregation unit tested; live Node terminal acknowledgements require hardware validation |
 | Message cancellation | Yes | Fragment cancellation aggregation unit tested; live Node cancellation acknowledgement requires hardware validation |
 | Node telemetry and satellite quality | Yes | Two Android runtimes returned stable disconnected snapshots without core crashes; connected values require hardware validation |

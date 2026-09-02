@@ -50,6 +50,8 @@ public object SomewearGatewayContract {
         public const val CANCEL_MESSAGE: String = "cancelMessage"
         public const val GET_DELIVERY_STATUS: String = "getDeliveryStatus"
         public const val POLL_INCOMING_MESSAGES: String = "pollIncomingMessages"
+        public const val ACKNOWLEDGE_INCOMING_MESSAGES: String =
+            "acknowledgeIncomingMessages"
         public const val LIST_INCOMPLETE_MESSAGE_TRANSFERS: String =
             "listIncompleteMessageTransfers"
         public const val REQUEST_MISSING_MESSAGE_FRAGMENTS: String =
@@ -176,6 +178,10 @@ public object SomewearGatewayContract {
         public const val UPDATED_AT_MS: String = "updated_at_ms"
 
         public const val AFTER_SEQUENCE: String = "after_sequence"
+        public const val THROUGH_SEQUENCE: String = "through_sequence"
+        public const val ACKNOWLEDGED_THROUGH_SEQUENCE: String =
+            "acknowledged_through_sequence"
+        public const val REMAINING_COUNT: String = "remaining_count"
         public const val LIMIT: String = "limit"
         public const val OFFSET: String = "offset"
         public const val NEXT_OFFSET: String = "next_offset"
@@ -195,7 +201,24 @@ public object SomewearGatewayContract {
         public const val LAST_PAYLOAD_TYPE: String = "last_payload_type"
         public const val LAST_RECEIVE_ERROR: String = "last_receive_error"
         public const val QUEUED_INCOMING_COUNT: String = "queued_incoming_count"
+        public const val PERSISTENT_INBOX_ENABLED: String = "persistent_inbox_enabled"
+        public const val OLDEST_SEQUENCE: String = "oldest_sequence"
+        public const val DROPPED_INCOMING_COUNT: String = "dropped_incoming_count"
         public const val LATEST_SEQUENCE: String = "latest_sequence"
+        public const val SUBSCRIBED_ROUTER_MATCHES_CURRENT: String =
+            "subscribed_router_matches_current"
+        public const val SUBSCRIPTION_ATTEMPT_COUNT: String = "subscription_attempt_count"
+        public const val SUBSCRIPTION_REPLACEMENT_COUNT: String =
+            "subscription_replacement_count"
+        public const val LAST_SUBSCRIPTION_AT_MS: String = "last_subscription_at_ms"
+        public const val RECEIVE_SERVICE_CREATED: String = "receive_service_created"
+        public const val RECEIVE_SERVICE_BIND_COUNT: String = "receive_service_bind_count"
+        public const val RECEIVE_SERVICE_UNBIND_COUNT: String = "receive_service_unbind_count"
+        public const val RECEIVE_SERVICE_LAST_EVENT_AT_MS: String =
+            "receive_service_last_event_at_ms"
+        public const val CORE_CONFIGURED: String = "core_configured"
+        public const val PACKAGE_STREAM_STATE_KNOWN: String = "package_stream_state_known"
+        public const val PACKAGE_STREAM_STARTED: String = "package_stream_started"
         public const val INBOUND_TRANSPORT_FRAGMENT_COUNT: String =
             "inbound_transport_fragment_count"
         public const val COMPLETED_TRANSPORT_MESSAGE_COUNT: String =

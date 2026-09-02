@@ -7,6 +7,9 @@ public interface SomewearClient : AutoCloseable {
     public suspend fun info(): SomewearResult<GatewayInfo>
     public suspend fun initialize(): SomewearResult<Unit>
 
+    /** Revalidates the service anchor and the subscription against the current Core router. */
+    public suspend fun ensureReceiving(): SomewearResult<Unit>
+
     public suspend fun connectBluetooth(
         macAddress: String,
         timeoutMillis: Long? = null,
@@ -70,6 +73,14 @@ public interface SomewearClient : AutoCloseable {
         afterSequence: Long,
         limit: Int = 50,
     ): SomewearResult<List<IncomingMessage>>
+
+    /**
+     * Removes gateway inbox records through [sequence]. Call only after SC3 has
+     * durably stored every message through that sequence.
+     */
+    public suspend fun acknowledgeIncomingMessagesThrough(
+        sequence: Long,
+    ): SomewearResult<IncomingAcknowledgement>
 
     public fun incomingMessages(afterSequence: Long = 0L): Flow<IncomingMessage>
 

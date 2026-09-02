@@ -19,12 +19,33 @@ public final class SomewearGatewayService extends Service {
     public void onCreate() {
         super.onCreate();
         GatewayV2.initialize(this);
+        GatewayV2.onReceiveServiceCreated();
         GatewayV2.startReceiving();
     }
 
     @Override
     public IBinder onBind(Intent intent) {
+        GatewayV2.onReceiveServiceBound();
         GatewayV2.startReceiving();
         return binder;
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        GatewayV2.onReceiveServiceUnbound();
+        return true;
+    }
+
+    @Override
+    public void onRebind(Intent intent) {
+        super.onRebind(intent);
+        GatewayV2.onReceiveServiceBound();
+        GatewayV2.startReceiving();
+    }
+
+    @Override
+    public void onDestroy() {
+        GatewayV2.onReceiveServiceDestroyed();
+        super.onDestroy();
     }
 }
